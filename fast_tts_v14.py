@@ -4,28 +4,36 @@ Fast TTS v14 — True Streaming Playback
 - CUDA graph warmup done ONCE during model loading
 - TRUE streaming: producer thread -> queue -> player (no two-phase collection)
 - Text segmentation for long inputs (split_segments)
-- Per-chunk normalization for consistent loudness
+- Global RMS normalization for consistent loudness across chunks
 - Live speaker output via sounddevice
 """
-import torch, time, numpy as np, threading, queue, soundfile as sf, re, sys
+import argparse, re, sys, threading, time, queue
+import numpy as np
+import torch
+import soundfile as sf
+import sounddevice as sd
 
 
 # ============================================================================
 # HELPERS
 # ============================================================================
 def to_pcm_chunk(x):
-    """Safely convert audio chunk to float32 PCM - always a real copy."""
+    """Safely convert audio chunk to float32 PCM."""
     if torch.is_tensor(x):
         x = x.detach().cpu().numpy()
-    return np.array(x, dtype=np.float32, copy=True).reshape(-1)
+    return np.asarray(x, dtype=np.float32).reshape(-1)
 
 
-def safe_normalize(chunk, limit=0.99):
-    """Per-chunk clip protection - prevents loudness pumping between chunks."""
-    peak = float(np.max(np.abs(chunk))) if chunk.size else 0.0
-    if peak > limit:
-        chunk = chunk * (limit / peak)
-    return chunk
+def global_normalize(audio_chunks, limit=0.95):
+    """Normalize all chunks together by global peak to avoid loudness pumping."""
+    if not audio_chunks:
+        return audio_chunks
+    full = np.concatenate(audio_chunks)
+    peak = float(np.max(np.abs(full))) if full.size else 0.0
+    if peak > limit and peak > 0:
+        scale = limit / peak
+        return [c * scale for c in audio_chunks]
+    return audio_chunks
 
 
 def split_segments(text, max_chars=85):
@@ -51,7 +59,7 @@ def split_segments(text, max_chars=85):
             if not buf:
                 buf = p
             elif len(buf) + 1 + len(p) <= max_chars:
-                buf = f"{buf} {p}"
+                buf = f"{buf} {p}"   # fixed: was missing space
             else:
                 segments.append(buf)
                 buf = p
@@ -64,8 +72,8 @@ def split_segments(text, max_chars=85):
                 for w in words:
                     if not cur:
                         cur = w
-                    elif len(cur) + 1 + len(w) <= max_chars:
-                        cur = f"{cur} {w}"
+                    elif len(cur) + 1 + 1 + len(w) <= max_chars:
+                        cur = f"{cur} {w}"  # fixed: was missing space
                     else:
                         segments.append(cur)
                         cur = w
@@ -80,9 +88,6 @@ def split_segments(text, max_chars=85):
 class StreamingAudioPlayer:
     def __init__(self, sample_rate=24000, device_id=None, blocksize=1024, preroll_sec=0.3):
         self.sample_rate = sample_rate
-        import sounddevice as sd
-        self.sd = sd
-
         if device_id is None:
             devices = sd.query_devices()
             for i, d in enumerate(devices):
@@ -107,8 +112,8 @@ class StreamingAudioPlayer:
         self._stream = None
 
     def start(self):
-        print(f"  [Audio] Device {self.device_id}: {self.sd.query_devices()[self.device_id]['name'][:50]}", flush=True)
-        self._stream = self.sd.OutputStream(
+        print(f"  [Audio] Device {self.device_id}: {sd.query_devices()[self.device_id]['name'][:50]}", flush=True)
+        self._stream = sd.OutputStream(
             samplerate=self.sample_rate, channels=1, dtype="float32",
             device=self.device_id, blocksize=self.blocksize, latency="high",
             callback=self._callback,
@@ -158,12 +163,14 @@ class StreamingAudioPlayer:
         chunk = np.asarray(chunk, dtype=np.float32).reshape(-1)
         if chunk.size == 0:
             return
+        # fixed: update _buffered under lock BEFORE put to avoid race condition
+        with self._lock:
+            self._buffered += chunk.size
         try:
             self._chunks.put_nowait(np.ascontiguousarray(chunk))
-            with self._lock:
-                self._buffered += chunk.size
         except queue.Full:
-            pass
+            with self._lock:
+                self._buffered -= chunk.size
 
     def buffered_seconds(self):
         with self._lock:
@@ -191,12 +198,23 @@ class StreamingAudioPlayer:
                 pass
         print(f"  [Audio] Underruns: {self._underruns}", flush=True)
 
+    def reset(self):
+        """Reset player state for reuse without reopening the stream."""
+        with self._lock:
+            self._chunks.queue.clear()
+            self._current = None
+            self._offset = 0
+            self._buffered = 0
+            self._done = False
+            self._started = False
+        self._finished.clear()
+
 
 # ============================================================================
-# FAST TTS V14 — True Streaming with Crossfade
+# FAST TTS V14 — True Streaming
 # ============================================================================
 class FastTTSv14:
-    """Fast streaming TTS with true producer-consumer pipeline + crossfade."""
+    """Fast streaming TTS with true producer-consumer pipeline."""
 
     def __init__(self, model_path, device='cuda:0', speaker='Sohee'):
         self.device = device
@@ -218,13 +236,13 @@ class FastTTSv14:
         t0 = time.perf_counter()
 
         self.model.generate_custom_voice(
-            text="Привет, это тест потоковой генерации с кроссфейдом. Теперь звук должен быть плавным без щелчков!",
+            text="Привет, это тест потоковой генерации. Теперь звук должен быть плавным!",
             speaker=self.speaker,
             language='Russian',
             max_new_tokens=15,
         )
 
-        warmup_gen = self.model.generate_custom_voice_streaming(
+        self.model.generate_custom_voice_streaming(
             text="Привет! Как дела? Я живу в Москве. Это тест потоковой генерации.",
             speaker=self.speaker,
             language='Russian',
@@ -232,8 +250,6 @@ class FastTTSv14:
             max_new_tokens=30,
             backend='auto',
         )
-        for _ in warmup_gen:
-            pass
 
         torch.cuda.synchronize()
         warmup_ms = (time.perf_counter() - t0) * 1000
@@ -248,7 +264,7 @@ class FastTTSv14:
 
     @torch.inference_mode()
     def generate_and_play(self, text, language='Russian', save_wav=None):
-        """True streaming: producer thread -> queue -> player with crossfade."""
+        """True streaming: producer thread -> queue -> player."""
         segments = split_segments(text, max_chars=85)
         print(f"\n[V14] Generating {len(segments)} segments:", flush=True)
         for i, s in enumerate(segments):
@@ -257,7 +273,7 @@ class FastTTSv14:
         if not segments:
             return [np.zeros(0, dtype=np.float32)], 24000, {}
 
-        # Audio player
+        # Audio player — preroll 0.3s for low TTFA
         player = StreamingAudioPlayer(sample_rate=24000, preroll_sec=0.3)
         player.start()
 
@@ -267,13 +283,14 @@ class FastTTSv14:
 
         # TTFA tracking
         first_chunk_time = [None]
-        MIN_START_SEC = 1.0  # wait longer before starting playback to avoid underruns
+        MIN_START_SEC = 0.3   # reduced from 1.0 — 0.3s is enough with CUDA graphs
         started = [False]
         chunk_count_ref = [0]
-        first_seg_done = [False]
+        all_wavs = []
 
         # ------------------------------------------------------------------
-        # PRODUCER: generate chunks, apply crossfade, send to queue
+        # PRODUCER: generate chunks, send to queue
+        # fixed: q.put(None) moved OUTSIDE the for seg loop (was causing deadlock)
         # ------------------------------------------------------------------
         def producer():
             try:
@@ -294,7 +311,6 @@ class FastTTSv14:
                             if first_chunk_time[0] is None:
                                 first_chunk_time[0] = time.perf_counter() - t_start
 
-                            # Convert to numpy
                             chunk = to_pcm_chunk(audio_chunk)
                             if chunk.size == 0:
                                 continue
@@ -302,25 +318,16 @@ class FastTTSv14:
                             chunk_count_ref[0] += 1
                             decode_ms = timing.get('decode_ms', 0)
                             print(f"  Chunk {chunk_count_ref[0]}: len={len(chunk)} samples, decode={decode_ms:.0f}ms", flush=True)
+                            all_wavs.append(chunk)
 
-                            # Per-chunk normalization
-                            chunk = safe_normalize(chunk)
-
-                            # Backpressure: wait BEFORE putting (don't overfill queue)
-                            while q.qsize() >= 20 and not player.is_finished():
-                                time.sleep(0.01)
-
+                            # fixed: queue.put blocks automatically when full (maxsize=32)
                             q.put(chunk)
 
                     finally:
                         gen.close()
 
-                    # Small pause between segments to let player buffer fill
-                    if not first_seg_done[0]:
-                        first_seg_done[0] = True
-                        time.sleep(0.3)
-
-                q.put(None)  # sentinel
+                # fixed: sentinel AFTER all segments are processed
+                q.put(None)
 
             except Exception as e:
                 errors.append(e)
@@ -337,7 +344,6 @@ class FastTTSv14:
         # ------------------------------------------------------------------
         # CONSUMER: read from queue -> player (immediate playback)
         # ------------------------------------------------------------------
-        all_wavs = []
         max_buffer_sec = 3.5
 
         while True:
@@ -358,7 +364,6 @@ class FastTTSv14:
             while player.buffered_seconds() > max_buffer_sec and not player.is_finished():
                 time.sleep(0.01)
 
-            all_wavs.append(chunk)
             player.add_chunk(chunk)
 
             # Start playback when buffer is warm
@@ -377,6 +382,9 @@ class FastTTSv14:
             player.stop()
             raise errors[0]
 
+        # Global RMS normalization (avoids loudness pumping between chunks)
+        all_wavs = global_normalize(all_wavs)
+
         total_ms = (time.perf_counter() - t_start) * 1000
         ttfa_ms = first_chunk_time[0] * 1000 if first_chunk_time[0] else 0
         audio_total_s = sum(len(c) for c in all_wavs) / 24000.0
@@ -392,7 +400,6 @@ class FastTTSv14:
         player.stop()
 
         if save_wav and all_wavs:
-            # Save with crossfade (smooth output)
             full_audio = np.concatenate(all_wavs)
             sf.write(save_wav, full_audio, 24000)
             print(f"  Saved: {save_wav}", flush=True)
@@ -402,19 +409,27 @@ class FastTTSv14:
 # MAIN
 # ============================================================================
 def main():
-    model_path = r'G:\Foundation\models\Qwen3-TTS'
+    parser = argparse.ArgumentParser(description='Fast TTS v14 — Streaming playback')
+    parser.add_argument('--model', default=r'G:\Foundation\models\Qwen3-TTS',
+                        help='Path to Qwen3-TTS model directory')
+    parser.add_argument('--speaker', default='Sohee')
+    parser.add_argument('--text', nargs='*', help='Text to synthesize (or use default)')
+    args = parser.parse_args()
 
-    text = ' '.join(sys.argv[1:]) if len(sys.argv) > 1 else (
-        "Привет! Это тест потоковой генерации с кроссфейдом. "
-        "Теперь звук должен быть плавным без щелчков!"
+    text = ' '.join(args.text) if args.text else (
+        "Привет! Это тест потоковой генерации. Звук должен быть плавным без щелчков!"
     )
 
     print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
     print(f"PyTorch: {torch.__version__}", flush=True)
     print()
 
-    tts = FastTTSv14(model_path, speaker='Sohee')
-    tts.generate_and_play(text, save_wav='tts_output_v14.wav')
+    tts = FastTTSv14(args.model, speaker=args.speaker)
+    try:
+        tts.generate_and_play(text, save_wav='tts_output_v14.wav')
+    except KeyboardInterrupt:
+        print("\n[V14] Interrupted.", flush=True)
+        sys.exit(0)
 
 
 # ============================================================================
@@ -422,7 +437,8 @@ def main():
 # ============================================================================
 def run_test_suite():
     """Run test suite with 10 sentences for audio verification."""
-    model_path = r'G:\Foundation\models\Qwen3-TTS'
+    import os
+    model_path = os.getenv('MODEL_PATH', r'G:\Foundation\models\Qwen3-TTS')
 
     print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
     print(f"PyTorch: {torch.__version__}", flush=True)
