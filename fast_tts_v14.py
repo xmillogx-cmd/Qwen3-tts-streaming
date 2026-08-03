@@ -155,7 +155,7 @@ class StreamingAudioPlayer:
                 self._finished.set()
 
     def add_chunk(self, chunk):
-        """Accepts pre-normalized float32 PCM chunks. No internal normalize."""
+        """Accepts pre-normalized float32 PCM chunks. Blocks if queue is full."""
         if chunk is None:
             with self._lock:
                 self._done = True
@@ -166,11 +166,13 @@ class StreamingAudioPlayer:
         # fixed: update _buffered under lock BEFORE put to avoid race condition
         with self._lock:
             self._buffered += chunk.size
-        try:
-            self._chunks.put_nowait(np.ascontiguousarray(chunk))
-        except queue.Full:
-            with self._lock:
-                self._buffered -= chunk.size
+        # fixed: blocking put with retry instead of dropping chunks on Full
+        while True:
+            try:
+                self._chunks.put_nowait(np.ascontiguousarray(chunk))
+                break
+            except queue.Full:
+                time.sleep(0.005)
 
     def buffered_seconds(self):
         with self._lock:
@@ -201,7 +203,12 @@ class StreamingAudioPlayer:
     def reset(self):
         """Reset player state for reuse without reopening the stream."""
         with self._lock:
-            self._chunks.queue.clear()
+            # fixed: drain queue properly instead of touching internal .queue
+            while not self._chunks.empty():
+                try:
+                    self._chunks.get_nowait()
+                except queue.Empty:
+                    break
             self._current = None
             self._offset = 0
             self._buffered = 0
@@ -255,6 +262,10 @@ class FastTTSv14:
         warmup_ms = (time.perf_counter() - t0) * 1000
         print(f"[V14] Warmup: {warmup_ms:.0f}ms | Ready!", flush=True)
 
+        # fixed: create player once and reuse across generate_and_play calls
+        self.player = StreamingAudioPlayer(sample_rate=24000, preroll_sec=0.3)
+        self.player.start()
+
     def _get_max_new_tokens(self, text):
         word_count = len(re.findall(r'\b\w+\b', text))
         if word_count <= 2: return 20
@@ -273,10 +284,8 @@ class FastTTSv14:
         if not segments:
             return [np.zeros(0, dtype=np.float32)], 24000, {}
 
-        # Audio player — preroll 0.3s for low TTFA
-        player = StreamingAudioPlayer(sample_rate=24000, preroll_sec=0.3)
-        player.start()
-
+        # fixed: reuse self.player instead of creating new one each call
+        self.player.reset()
         q = queue.Queue(maxsize=32)
         errors = []
         t_start = time.perf_counter()
@@ -361,25 +370,24 @@ class FastTTSv14:
                 continue
 
             # Backpressure: wait BEFORE adding to player
-            while player.buffered_seconds() > max_buffer_sec and not player.is_finished():
+            while self.player.buffered_seconds() > max_buffer_sec and not self.player.is_finished():
                 time.sleep(0.01)
 
-            player.add_chunk(chunk)
+            self.player.add_chunk(chunk)
 
             # Start playback when buffer is warm
             if not started[0]:
-                if player.buffered_seconds() >= MIN_START_SEC:
-                    player.request_start()
+                if self.player.buffered_seconds() >= MIN_START_SEC:
+                    self.player.request_start()
                     started[0] = True
 
         gen_thread.join(timeout=120)
         if gen_thread.is_alive():
             print("WARNING: generator thread did not finish in 120s", flush=True)
 
-        player.add_chunk(None)
+        self.player.add_chunk(None)
 
         if errors:
-            player.stop()
             raise errors[0]
 
         # Global RMS normalization (avoids loudness pumping between chunks)
@@ -396,8 +404,7 @@ class FastTTSv14:
         print(f"  Total audio: {audio_total_s:.2f}s", flush=True)
 
         print("  Waiting for playback...", flush=True)
-        player.wait(timeout=60.0)
-        player.stop()
+        self.player.wait(timeout=60.0)
 
         if save_wav and all_wavs:
             full_audio = np.concatenate(all_wavs)
@@ -429,7 +436,8 @@ def main():
         tts.generate_and_play(text, save_wav='tts_output_v14.wav')
     except KeyboardInterrupt:
         print("\n[V14] Interrupted.", flush=True)
-        sys.exit(0)
+    finally:
+        tts.player.stop()
 
 
 # ============================================================================
@@ -464,14 +472,17 @@ def run_test_suite():
     print("[V14] TEST SUITE — 5 Russian + 5 English Paragraphs", flush=True)
     print(f"{'='*70}", flush=True)
 
-    for i, (lang, text) in enumerate(test_sentences):
-        save_wav = f'tts_test_v14_{i+1:02d}_{lang.lower()}.wav'
-        print(f"\n[{i+1}/10] [{lang}] {text}", flush=True)
-        tts.generate_and_play(text, language=lang, save_wav=save_wav)
+    try:
+        for i, (lang, text) in enumerate(test_sentences):
+            save_wav = f'tts_test_v14_{i+1:02d}_{lang.lower()}.wav'
+            print(f"\n[{i+1}/10] [{lang}] {text}", flush=True)
+            tts.generate_and_play(text, language=lang, save_wav=save_wav)
 
-    print(f"\n{'='*70}", flush=True)
-    print("[V14] All 10 tests complete!", flush=True)
-    print(f"{'='*70}", flush=True)
+        print(f"\n{'='*70}", flush=True)
+        print("[V14] All 10 tests complete!", flush=True)
+        print(f"{'='*70}", flush=True)
+    finally:
+        tts.player.stop()
 
 
 if __name__ == '__main__':
