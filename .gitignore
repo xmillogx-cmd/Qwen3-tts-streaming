@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Conda environment
+.conda/
+.env
+venv/
+env/
+
+# Audio output files
+*.wav
+*.mp3
+*.flac
+
+# Logs
+*.log
+test_*.log
+
+# Benchmark data
+bench_comparison.json
+benchmark_results*.json
+
+# Build artifacts
+flash-attention/
+wheels/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model checkpoints (too large)
+# Add specific model dirs if needed
