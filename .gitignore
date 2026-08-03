@@ -43,3 +43,10 @@ Thumbs.db
 
 # Model checkpoints (too large)
 # Add specific model dirs if needed
+
+# Large binary assets
+*.pdf
+*.npz
+*.bin
+*.safetensors
+*.model
