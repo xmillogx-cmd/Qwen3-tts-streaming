@@ -1,0 +1,6 @@
+[submodule "Qwen3-TTS"]
+	path = Qwen3-TTS
+	url = https://github.com/QwenLM/Qwen3-TTS.git
+[submodule "faster-qwen3-tts"]
+	path = faster-qwen3-tts
+	url = https://github.com/andimarafioti/faster-qwen3-tts.git

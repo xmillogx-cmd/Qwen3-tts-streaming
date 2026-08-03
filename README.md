@@ -6,10 +6,9 @@
 
 | Компонент | Описание |
 |-----------|----------|
+| `fast_tts_v14.py` | Финальная реализация — true streaming через нативный `generate_custom_voice_streaming` + кроссфейд |
 | `qwen_tts_cuda_graphs/` | Кастомные `PredictorGraph` и `TalkerGraph` — перенесены из [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) с адаптацией под нативный `qwen_tts` |
-| `streaming_tts_v6.py` | Первый рабочий producer-consumer pipeline (фикс underruns) |
-| `streaming_tts_v7.py` | Parallel generation через ThreadPoolExecutor |
-| `streaming_tts_v8.py` | torch.compile + chunked decode с overlap-add crossfade |
+| `test_native.py`, `test_v14.py` | Тесты нативного API и v14 |
 | `docs/` | Техническая документация по оптимизациям |
 
 ## Результаты на RTX 5060 Ti (CC 12.0)
@@ -27,17 +26,25 @@
 - `TalkerGraph` — захватывает single-token decode talker'а (~12ms вместо ~75ms)
 - Используется `transformers.StaticCache` вместо DynamicCache для фиксированных KV-буферов
 
-### Streaming Pipeline
+### Streaming Pipeline (v14)
+- Нативный `generate_custom_voice_streaming()` — без ручного управления токенами
 - Producer-consumer архитектура: поток генерации → очередь → плеер
 - Автоматическое разбиение длинного текста на сегменты (`split_segments`)
 - Crossfade между чанками для плавного перехода
-- Преролл 0.6s — звук появляется через ~350ms
-
-### torch.compile
-- `torch.compile(mode='reduce-overhead')` на модели и talker
-- Снижение Python overhead при последовательных forward-проходах
+- Преролл 0.3s — звук появляется через ~350ms
 
 ## Установка
+
+### Клонирование (с подмодулями)
+
+```bash
+git clone --recursive https://github.com/xmillogx-cmd/Qwen3-tts-streaming.git
+cd Qwen3-tts-streaming
+# Или если уже склонирован без --recursive:
+git submodule update --init --recursive
+```
+
+### Зависимости
 
 ```bash
 # Базовые зависимости
@@ -52,51 +59,48 @@ pip install -U flash-attn --no-build-isolation
 ## Быстрый старт
 
 ```python
-from streaming_tts_v8 import StreamingTTS
+from fast_tts_v14 import FastTTSv14
 
-tts = StreamingTTS(
+tts = FastTTSv14(
     model_path="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-    speaker="Vivian",
-    language="Russian",
+    speaker="Sohee",
 )
 
 # Потоковая генерация с живым воспроизведением
-tts.generate("Привет! Это тест потокового синтеза речи.")
+tts.generate_and_play("Привет! Это тест потокового синтеза речи.")
 ```
 
 ## Структура проекта
 
 ```
 qwen-tts-streaming/
+├── fast_tts_v14.py             # Финальная версия — true streaming + crossfade
 ├── qwen_tts_cuda_graphs/       # CUDA Graph оптимизации
 │   ├── __init__.py
 │   ├── predictor_graph.py      # 15-step predictor loop capture
 │   ├── talker_graph.py         # Single-token talker decode capture
 │   └── sampling.py             # Token sampling utilities
-├── streaming_tts_v6.py         # Producer-consumer pipeline (фикс underruns)
-├── streaming_tts_v7.py         # Parallel generation
-├── streaming_tts_v8.py         # torch.compile + chunked decode
+├── test_native.py              # Тест нативного generate_custom_voice_streaming
+├── test_v14.py                 # Тест v14 (10 предложений)
 ├── docs/
 │   ├── cuda_graphs_optimization.md  # Детальный разбор CUDA Graphs
 │   └── qwen3-tts-implementation.md  # Архитектура и эволюция версий
-├── bench_*.py                  # Бенчмарки
-├── profile_*.py                # Профилировщики
-├── test_*.py                   # Тесты
-└── QWEN.md                     # Заметки по проекту
+├── Qwen3-TTS/                  # submodule — оригинальный Qwen3-TTS
+└── faster-qwen3-tts/           # submodule — источник CUDA Graphs
 ```
 
-## Архитектура генерации
+## Архитектура генерации (v14)
 
 ```
-Текст → tokenize → Talker prefill (StaticCache)
-                ↓
-        Predictor × 15 (CUDA graph, ~26ms/шаг)
-                ↓
-        Codec tokens [cb0..cb14]
-                ↓
-        Chunked decode → Waveform @24kHz
-                ↓
-        Crossfade chunks → Streaming playback
+Текст → split_segments() → generate_custom_voice_streaming() × N сегментов
+                                      ↓
+                    Talker prefill + Predictor × 15 (CUDA graphs)
+                                      ↓
+                    Codec tokens [cb0..cb14] → chunked_decode()
+                                      ↓
+                    Producer thread → queue → StreamingAudioPlayer
+                                      ↓
+                    Crossfade chunks → Live playback @24kHz
 ```
 
 ## Зависимости
