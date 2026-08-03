@@ -52,10 +52,8 @@ git submodule update --init --recursive
 # Core dependencies
 pip install -U qwen-tts transformers accelerate torchaudio soundfile sounddevice
 
-# Flash Attention (optional, reduces memory usage)
-set "CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
-set "FLASH_ATTN_CUDA_ARCHS=120"
-pip install -U flash-attn --no-build-isolation
+# Note: SDPA attention is used by default — it's compatible with CUDA graphs.
+# Flash Attention 2 is NOT compatible with CUDA graph capture and will crash.
 ```
 
 ### Quick start
@@ -172,10 +170,8 @@ git submodule update --init --recursive
 # Базовые зависимости
 pip install -U qwen-tts transformers accelerate torchaudio soundfile sounddevice
 
-# Flash Attention (опционально, для снижения памяти)
-set "CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
-set "FLASH_ATTN_CUDA_ARCHS=120"
-pip install -U flash-attn --no-build-isolation
+# Примечание: используется SDPA attention по умолчанию — совместима с CUDA graphs.
+# Flash Attention 2 НЕ совместима с захватом CUDA graph и вызовет ошибку.
 ```
 
 ### Быстрый старт

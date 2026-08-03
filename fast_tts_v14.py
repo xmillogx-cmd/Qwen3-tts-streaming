@@ -238,25 +238,29 @@ class FastTTSv14:
         load_ms = (time.perf_counter() - t0) * 1000
         print(f"[V14] Load: {load_ms:.0f}ms", flush=True)
 
-        # Warmup - captures CUDA graphs with realistic prefill length
-        print("[V14] Warming up CUDA graphs...", flush=True)
+        # Preflight warmup - capture CUDA graphs for ALL chunk_size variants
+        # This prevents TTFA spikes on first real request
+        print("[V14] Preflight warmup (all chunk sizes)...", flush=True)
         t0 = time.perf_counter()
 
-        self.model.generate_custom_voice(
-            text="Привет, это тест потоковой генерации. Теперь звук должен быть плавным!",
-            speaker=self.speaker,
-            language='Russian',
-            max_new_tokens=15,
-        )
+        warmup_texts = {
+            'Russian': "Привет! Как дела? Я живу в Москве. Это тест потоковой генерации речи.",
+            'English': "Hello! How are you doing today? This is a test of streaming speech generation.",
+        }
 
-        self.model.generate_custom_voice_streaming(
-            text="Привет! Как дела? Я живу в Москве. Это тест потоковой генерации.",
-            speaker=self.speaker,
-            language='Russian',
-            chunk_size=8,
-            max_new_tokens=30,
-            backend='auto',
-        )
+        for lang in ['Russian', 'English']:
+            for chunk_size in [2, 4, 8]:
+                gen = self.model.generate_custom_voice_streaming(
+                    text=warmup_texts[lang],
+                    speaker=self.speaker,
+                    language=lang,
+                    chunk_size=chunk_size,
+                    max_new_tokens=50,
+                    backend='auto',
+                )
+                for _ in gen:
+                    pass
+                gen.close()
 
         torch.cuda.synchronize()
         warmup_ms = (time.perf_counter() - t0) * 1000
@@ -292,7 +296,7 @@ class FastTTSv14:
 
         # TTFA tracking
         first_chunk_time = [None]
-        MIN_START_SEC = 0.3   # reduced from 1.0 — 0.3s is enough with CUDA graphs
+        MIN_START_SEC = 1.0   # 1s preroll for smooth playback
         started = [False]
         chunk_count_ref = [0]
         all_wavs = []
