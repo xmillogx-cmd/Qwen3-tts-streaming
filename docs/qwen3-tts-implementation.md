@@ -1,209 +1,209 @@
-# Qwen3-TTS: Потоковая генерация с CUDA Graphs ускорением
+# Qwen3-TTS: Streaming Generation with CUDA Graphs Acceleration
 
-Полный технический разбор нашей реализации потокового TTS на базе Qwen3-TTS.
+Complete technical breakdown of our streaming TTS implementation based on Qwen3-TTS.
 
-## Содержание
+## Table of Contents
 
-1. [Введение](#1-введение)
-2. [Архитектура Qwen3-TTS](#2-архитектура-qwen3-tts)
-3. [Проблемы стандартной реализации](#3-проблемы-стандартной-реализации)
-4. [CUDA Graphs оптимизация](#4-cuda-graphs-оптимизация)
-5. [Потоковая генерация (Streaming Pipeline)](#5-потоковая-генерация-streaming-pipeline)
-6. [Эволюция версий (v6 → v14)](#6-эволюция-версий-v6--v14)
-7. [Сравнение с FasterQwen3TTS](#7-сравнение-с-fasterqwen3tts)
-8. [Бенчмарки на RTX 5060 Ti](#8-бенчмарки-на-rtx-5060-ti)
-9. [Установка и запуск](#9-установка-и-запуск)
-10. [Ключевые паттерны кода](#10-ключевые-паттерны-кода)
+1. [Introduction](#1-introduction)
+2. [Qwen3-TTS Architecture](#2-qwen3-tts-architecture)
+3. [Standard Implementation Problems](#3-standard-implementation-problems)
+4. [CUDA Graphs Optimization](#4-cuda-graphs-optimization)
+5. [Streaming Generation (Streaming Pipeline)](#5-streaming-generation-streaming-pipeline)
+6. [Version Evolution (v6 → v14)](#6-version-evolution-v6--v14)
+7. [Comparison with FasterQwen3TTS](#7-comparison-with-fasterqwen3tts)
+8. [Benchmarks on RTX 5060 Ti](#8-benchmarks-on-rtx-5060-ti)
+9. [Installation and Running](#9-installation-and-running)
+10. [Key Code Patterns](#10-key-code-patterns)
 
 ---
 
-## 1. Введение
+## 1. Introduction
 
-Мы реализовали потоковую генерацию речи на базе **Qwen3-TTS-0.6B** с ускорением через **CUDA Graphs**. Результат:
+We implemented streaming speech generation based on **Qwen3-TTS-0.6B** with **CUDA Graphs** acceleration. Results:
 
-| Метрика | До оптимизации | После | Ускорение |
-|---------|---------------|-------|-----------|
+| Metric | Before optimization | After | Speedup |
+|---------|---------------|-------|---------|
 | ms/step | 247.7ms | 31.3ms | **7.9x** |
-| RTF | 0.336 (медленнее реалтайма) | 2.67 (быстрее в 2.7x) | **8.0x** |
-| TTFA | ~40s (весь аудио сразу) | ~355ms | **113x** |
+| RTF | 0.336 (slower than realtime) | 2.67 (2.7× faster!) | **8.0x** |
+| TTFA | ~40s (all audio at once) | ~355ms | **113x** |
 
-### Ключевые достижения
+### Key achievements
 
-- **Потоковая генерация**: звук появляется через ~350ms, а не через 40 секунд
-- **CUDA Graphs**: ускорение декодирования в ~8 раз за счёт устранения Python overhead
-- **Producer-consumer pipeline**: поток генерации → очередь → плеер без underruns
-- **Text segmentation**: автоматическое разбиение длинных текстов на сегменты
+- **Streaming generation**: audio starts in ~350ms instead of 40 seconds
+- **CUDA Graphs**: ~8× decoding speedup by eliminating Python overhead
+- **Producer-consumer pipeline**: generation thread → queue → player with no underruns
+- **Text segmentation**: automatic long-text splitting into segments
 
-### Файлы реализации
+### Implementation files
 
-| Файл | Описание |
-|------|----------|
-| `fast_tts_v14.py` | Финальная реализация — потоковая генерация с кроссфейдом |
-| `fast_tts_v10.py` | CUDA Graphs + streaming pipeline (переходная версия) |
-| `streaming_tts_v6.py` | Первый рабочий producer-consumer pipeline |
-| `qwen_tts_cuda_graphs/` | Кастомные PredictorGraph и TalkerGraph |
-| `docs/cuda_graphs_optimization.md` | Детальный разбор CUDA Graphs оптимизации |
+| File | Description |
+|------|-------------|
+| `fast_tts_v14.py` | Final implementation — streaming with crossfade |
+| `fast_tts_v10.py` | CUDA Graphs + streaming pipeline (transitional version) |
+| `streaming_tts_v6.py` | First working producer-consumer pipeline |
+| `qwen_tts_cuda_graphs/` | Custom PredictorGraph and TalkerGraph |
+| `docs/cuda_graphs_optimization.md` | Detailed CUDA Graphs optimization breakdown |
 
 ---
 
-## 2. Архитектура Qwen3-TTS
+## 2. Qwen3-TTS Architecture
 
-Qwen3-TTS — это **двухкомпонентная модель** для синтеза речи:
+Qwen3-TTS is a **two-component model** for speech synthesis:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │              Qwen3TTSForConditionalGeneration                │
 │                                                              │
 │  ┌───────────────────────────────────────────────────────┐   │
-│  │                  Talker (28 слоёв)                    │   │
+│  │                  Talker (28 layers)                   │   │
 │  │                                                       │   │
-│  │  Input: текст + язык + спикер                         │   │
+│  │  Input: text + language + speaker                     │   │
 │  │  Output: codec token (codebook 0)                     │   │
 │  │                                                       │   │
 │  │  ┌───────────────────────────────────────────────┐    │   │
-│  │  │     Code Predictor (5 слоёв)                  │    │   │
+│  │  │     Code Predictor (5 layers)                 │    │   │
 │  │  │                                               │    │   │
 │  │  │  Input: codebook N                            │    │   │
 │  │  │  Output: codebook N+1                         │    │   │
-│  │  │  (15 codebook-групп всего)                    │    │   │
+│  │  │  (15 codebook groups total)                   │    │   │
 │  │  └───────────────────────────────────────────────┘    │   │
 │  └───────────────────────────────────────────────────────┘   │
 │                                                              │
 │  Speech Tokenizer (HiFi-GGAN decoder)                       │
-│  Input: 15 codebook-токенов → Output: waveform @24kHz       │
+│  Input: 15 codebook tokens → Output: waveform @24kHz        │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Flow генерации
+### Generation flow
 
 ```
-Текст → tokenize → Talker prefill (динамический KV cache)
+Text → tokenize → Talker prefill (dynamic KV cache)
                 ↓
-        Code Predictor × 15 (последовательно)
+        Code Predictor × 15 (sequential)
                 ↓
         Codec token [cb0, cb1, ..., cb14]
                 ↓
         Speech Tokenizer decoder.chunked_decode()
                 ↓
-        Waveform @24kHz (12Hz codec = ~0.83s на токен)
+        Waveform @24kHz (12Hz codec = ~0.83s per token)
 ```
 
-### Ключевые параметры
+### Key parameters
 
-| Параметр | Значение | Описание |
-|----------|----------|----------|
-| Talker layers | 28 | Основной autoregressive decoder |
-| Code Predictor layers | 5 | Предсказывает оставшиеся codebook-группы |
-| Codebook groups | 15 | Всего групп на один timestep |
-| Codec rate | 12 Hz | 12 codec токенов в секунду аудио |
-| Sample rate | 24 kHz | Частота дискретизации выходного waveform |
-| Hidden size | 1024 | Размер embedding (0.6B модель) |
+| Parameter | Value | Description |
+|----------|-------|-------------|
+| Talker layers | 28 | Main autoregressive decoder |
+| Code Predictor layers | 5 | Predicts remaining codebook groups |
+| Codebook groups | 15 | Total groups per timestep |
+| Codec rate | 12 Hz | 12 codec tokens per second of audio |
+| Sample rate | 24 kHz | Output waveform sampling rate |
+| Hidden size | 1024 | Embedding size (0.6B model) |
 
-### Один шаг декодирования = ~15 forward-проходов
+### One decode step = ~15 forward passes
 
 ```python
-# Каждый шаг декодирования:
-for step in range(max_new_tokens):      # ~130 шагов на предложение
-    cb_0 = talker.forward(...)          # 1 forward (28 слоёв)
-    
-    for group in range(1, 15):          # 14 последовательных forward
+# Each decoding step:
+for step in range(max_new_tokens):      # ~130 steps per sentence
+    cb_0 = talker.forward(...)          # 1 forward (28 layers)
+
+    for group in range(1, 15):          # 14 sequential forwards
         hidden = predictor.forward(cb_{group-1})
-        cb_{group} = sample(hidden)     # Code Predictor (5 слоёв)
-    
-    # Итого: 1 + 14 = 15 forward на шаг
-    # × 130 шагов = ~2080 forward-проходов!
+        cb_{group} = sample(hidden)     # Code Predictor (5 layers)
+
+    # Total: 1 + 14 = 15 forward per step
+    # × 130 steps = ~2080 forward passes!
 ```
 
 ---
 
-## 3. Проблемы стандартной реализации
+## 3. Standard Implementation Problems
 
-Стандартный `Qwen3TTSModel.generate_custom_voice()` работает за **~250ms/step**. Разберём 4 узких места:
+Standard `Qwen3TTSModel.generate_custom_voice()` runs at **~250ms/step**. Let's examine 4 bottlenecks:
 
-### Узкое место #1: Динамический KV Cache (~40ms/step)
+### Bottleneck #1: Dynamic KV Cache (~40ms/step)
 
-На каждом шаге `past_key_values` растёт на 1 позицию. PyTorch вынужден:
-- Выделять новый тензор большего размера
-- Копировать старые значения
-- Обновлять attention mask
+On each step `past_key_values` grows by 1 position. PyTorch is forced to:
+- Allocate a new larger tensor
+- Copy old values
+- Update attention mask
 
 ```python
-# Каждый шаг — динамическое выделение:
-step_0: key = [K₀]                    # размер 1
-step_1: key = concat([K₀, K₁])        # размер 2 → аллокация!
-step_2: key = concat([K₀, K₁, K₂])    # размер 3 → аллокация!
+# Each step — dynamic allocation:
+step_0: key = [K₀]                    # size 1
+step_1: key = concat([K₀, K₁])        # size 2 → allocation!
+step_2: key = concat([K₀, K₁, K₂])    # size 3 → allocation!
 ...
-# На 28 слоях × 4 heads × 128 dim ≈ 720KB аллокации/шаг
+# On 28 layers × 4 heads × 128 dim ≈ 720KB allocations/step
 ```
 
-### Узкое место #2: Python → GPU dispatcher (~50ms/step)
+### Bottleneck #2: Python → GPU dispatcher (~50ms/step)
 
-Каждый forward-проход проходит через Python runtime:
+Each forward pass goes through the Python runtime:
 
 ```
 Python call → PyTorch dispatcher → Triton kernel compilation → CUDA launch
      ↑                                    ↑                      ↑
-  ~10ms                              ~30ms (первый раз!)      ~5ms
+  ~10ms                              ~30ms (first time!)      ~5ms
 ```
 
-На каждый шаг приходится **~150+ kernel launches** (28 слоёв × attention + MLP + norm):
+Per step there are **~150+ kernel launches** (28 layers × attention + MLP + norm):
 
 ```python
-# Каждый forward = сотни отдельных CUDA kernel launches:
+# Each forward = hundreds of individual CUDA kernel launches:
 layer_0.attention.q_proj.forward()     # → kernel launch 1
 layer_0.attention.k_proj.forward()     # → kernel launch 2
 ...
-# 150 × 4μs = 600μs только на launch overhead
+# 150 × 4μs = 600μs just on launch overhead
 ```
 
-### Узкое место #3: HF `generate()` цикл (~20ms/step)
+### Bottleneck #3: HF `generate()` loop (~20ms/step)
 
-Универсальный цикл генерации с кучей проверок на каждом шаге:
+Universal generation loop with lots of checks per step:
 
 ```python
-# transformers/generation/utils.py — упрощённо
+# transformers/generation/utils.py — simplified
 for i in range(max_new_tokens):
     outputs = self(inputs, past_key_values=past_kv)  # forward
-    
+
     scores = self.compute_scores(inputs, outputs)     # ~5ms
     scores = logits_processor(inputs, scores)         # top_k, top_p...
-    
-    for criteria in stopping_criteria:                # проверка EOS
+
+    for criteria in stopping_criteria:                # EOS check
         if criteria(outputs, scores):
             break
-    
-    next_tokens = self.sample(scores, ...)            # сэмплинг
+
+    next_tokens = self.sample(scores, ...)            # sampling
 ```
 
-### Узкое место #4: Code Predictor подцикл (~30ms/step)
+### Bottleneck #4: Code Predictor sub-loop (~30ms/step)
 
-15 codebook-групп генерируются **последовательно** внутри каждого шага talker'а — невозможно распараллелить без изменения архитектуры.
+15 codebook groups are generated **sequentially** inside each talker step — cannot be parallelized without changing the architecture.
 
-### Сводка по оверхеду
+### Overhead summary
 
-| Компонент | Время/шаг | % от общего |
+| Component | Time/step | % of total |
 |-----------|-----------|-------------|
-| Чистое GPU вычисление | ~60ms | 24% |
-| Динамический KV cache (alloc + cat) | ~40ms | 16% |
+| Pure GPU computation | ~60ms | 24% |
+| Dynamic KV cache (alloc + cat) | ~40ms | 16% |
 | Python dispatcher (~150 kernel launches) | ~50ms | 20% |
 | HF generate() overhead | ~20ms | 8% |
-| Code predictor подцикл (14× forward) | ~30ms | 12% |
+| Code predictor sub-loop (14× forward) | ~30ms | 12% |
 | CUDA kernel compilation (Triton) | ~50ms | 20% |
-| **Итого** | **~250ms/step** | **100%** |
+| **Total** | **~250ms/step** | **100%** |
 
 ---
 
-## 4. CUDA Graphs оптимизация
+## 4. CUDA Graphs Optimization
 
-### Идея
+### Idea
 
-Вместо выполнения forward-прохода через Python каждый шаг, мы:
-1. **Один раз** выполняем forward и **записываем** всю последовательность CUDA-операций
-2. На каждом шаге просто **replay** записанного графа — GPU проигрывает его напрямую
+Instead of executing a forward pass through Python each step, we:
+1. Run forward **once** and **record** the entire sequence of CUDA operations
+2. On each subsequent step, just **replay** the recorded graph — GPU plays it directly
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Первый раз (capture):                              │
+│  First time (capture):                              │
 │                                                     │
 │  Python → forward() → [recorder]                    │
 │              ↓                                      │
@@ -215,34 +215,34 @@ for i in range(max_new_tokens):
 │         │ Kernel N: codec_head          │           │
 │         └───────────────────────────────┘           │
 │                                                     │
-│  Каждый последующий шаг (replay):                   │
+│  Each subsequent step (replay):                     │
 │                                                     │
 │  cudaGraphLaunch(graph, stream)                     │
 │    ↓                                                │
-│  GPU проигрывает граф напрямую                      │
-│  (без Python! без dispatcher'а!)                    │
+│  GPU plays the graph directly                       │
+│  (no Python! no dispatcher!)                        │
 └─────────────────────────────────────────────────────┘
 ```
 
 ### StaticCache vs DynamicCache
 
-**Динамический (стандарт):**
+**Dynamic (standard):**
 ```python
-# Каждый шаг — новый тензор:
+# Each step — new tensor:
 past_key = torch.cat([old_key, new_key], dim=1)  # alloc + copy!
 ```
 
-**Статический (CUDA graphs):**
+**Static (CUDA graphs):**
 ```python
-# Один раз выделили фиксированный буфер:
+# Allocate fixed buffer once:
 static_cache = torch.zeros(1, num_heads, max_seq_len, head_dim, device='cuda')
 
-# Каждый шаг — запись в фиксированную позицию:
+# Each step — write to fixed position:
 step = 50
-static_cache[:, :, step, :] = new_key_value  # просто write!
+static_cache[:, :, step, :] = new_key_value  # just a write!
 ```
 
-### Архитектура наших CUDA Graphs
+### Our CUDA Graphs architecture
 
 ```
 ┌───────────────────────────────────────────────────────┐
@@ -253,7 +253,7 @@ static_cache[:, :, step, :] = new_key_value  # просто write!
 │  │                                                 │  │
 │  │  CUDA Graph:                                    │  │
 │  │    input_embed → predictor.forward() × 15       │  │
-│  │    (все 15 codebook-групп в одном графе!)       │  │
+│  │    (all 15 codebook groups in one graph!)       │  │
 │  └─────────────────────────────────────────────────┘  │
 │                                                       │
 │  ┌─────────────────────────────────────────────────┐  │
@@ -271,26 +271,26 @@ static_cache[:, :, step, :] = new_key_value  # просто write!
 └───────────────────────────────────────────────────────┘
 ```
 
-### PredictorGraph — захват предиктора
+### PredictorGraph — capturing the predictor graph
 
-Файл: `qwen_tts_cuda_graphs/predictor_graph.py`
+File: `qwen_tts_cuda_graphs/predictor_graph.py`
 
 ```python
 class PredictorGraph:
     def __init__(self, code_predictor, pred_config, talker_hidden_size, ...):
-        # Статические буферы для ввода/вывода
+        # Static buffers for input/output
         self.input_buf = torch.zeros(1, 2, talker_hidden_size, ...)
         self.output_tokens = torch.zeros(15, dtype=torch.long, ...)
-        
-        # StaticCache для предиктора (max_seq=17)
+
+        # StaticCache for predictor (max_seq=17)
         self.static_cache = StaticCache(config=pred_config, max_cache_len=17)
 
     def capture(self, num_warmup=3):
-        # Warmup — компилируем Triton-ядра один раз
+        # Warmup — compile Triton kernels once
         for _ in range(num_warmup):
-            self._full_loop()  # 15 codebook-групп
-        
-        # Захват графа
+            self._full_loop()  # 15 codebook groups
+
+        # Capture graph
         stream = torch.cuda.Stream()
         with torch.cuda.graph(self.graph):
             self._full_loop()
@@ -302,27 +302,27 @@ class PredictorGraph:
         return self.output_tokens.clone()
 ```
 
-### TalkerGraph — захват декодера
+### TalkerGraph — capturing the decoder
 
-Файл: `qwen_tts_cuda_graphs/talker_graph.py`
+File: `qwen_tts_cuda_graphs/talker_graph.py`
 
 ```python
 class TalkerGraph:
     def __init__(self, talker_model, talker_config, max_seq_len=2048):
-        # Статический KV cache — один раз на всю жизнь
+        # Static KV cache — allocated once for lifetime
         self.static_cache = StaticCache(config=talker_config, max_cache_len=max_seq_len)
-        
-        # Статические буферы
+
+        # Static buffers
         self.input_buf = torch.zeros(1, 1, hidden_size, ...)
         self.output_buf = torch.zeros(1, 1, hidden_size, ...)
         self.cache_position = torch.zeros(1, dtype=torch.long, ...)
 
     def prefill_kv(self, dynamic_past_kv):
-        """Копируем prefill KV из DynamicCache в StaticCache."""
+        """Copy prefill KV from DynamicCache to StaticCache."""
         for layer_idx in range(num_layers):
             k, v = dynamic_past_kv[layer_idx]
             cache_pos = torch.arange(k.shape[2], device=self.device)
-            self.static_cache.update(k, v, layer_idx, 
+            self.static_cache.update(k, v, layer_idx,
                                      {"cache_position": cache_pos})
         return k.shape[2]
 
@@ -334,83 +334,83 @@ class TalkerGraph:
         return self.output_buf
 ```
 
-### Основной цикл генерации (быстрый путь)
+### Main generation loop (fast path)
 
 ```python
 @torch.inference_mode()
 def fast_generate(talker, talker_input_embeds, predictor_graph, talker_graph):
-    # === PREFILL (один раз через обычный forward) ===
+    # === PREFILL (once via regular forward) ===
     out = talker.forward(
         inputs_embeds=talker_input_embeds,
         attention_mask=attention_mask,
-        use_cache=True,  # динамический cache только для prefill!
+        use_cache=True,  # dynamic cache only for prefill!
     )
-    
-    # Копируем prefill KV в статический буфер
+
+    # Copy prefill KV into static buffer
     prefill_len = talker_graph.prefill_kv(out.past_key_values)
-    
-    # Первый токен — обычный forward
+
+    # First token — regular forward
     logits = out.logits[:, -1]
     token = sample(logits)
-    
+
     # === DECODE LOOP (CUDA graphs!) ===
     all_codec_ids = []
-    
+
     for step_idx in range(max_new_tokens):
         if token.item() == eos_id:
             break
-            
-        # 1. Predictor — replay графа (~2ms!)
+
+        # 1. Predictor — replay graph (~2ms!)
         last_hidden = talker.get_input_embeddings()(token)
         pred_input = torch.cat([past_hidden, last_hidden], dim=1)
         codebook_ids = predictor_graph.run(pred_input)  # ← CUDA graph!
-        
-        # 2. Собираем полный codec token [cb0, cb1, ..., cb14]
+
+        # 2. Assemble full codec token [cb0, cb1, ..., cb14]
         all_cb = torch.cat([token.view(1), codebook_ids])
         all_codec_ids.append(all_cb.detach())
-        
-        # 3. Строим input embedding для talker
+
+        # 3. Build input embedding for talker
         inputs_embeds = build_codec_embedding(codebook_ids)
-        
-        # 4. Talker decode — replay графа (~29ms!)
+
+        # 4. Talker decode — replay graph (~29ms!)
         current_pos = prefill_len + step_idx
         hidden = talker_graph.run(inputs_embeds, position=current_pos)
-        
-        # 5. Логиты и сэмплинг (быстро, маленький тензор)
+
+        # 5. Logits and sampling (fast, small tensor)
         logits = talker.codec_head(hidden[:, -1])
         token = sample(logits)
-    
+
     return torch.stack(all_codec_ids), timing
 ```
 
 ### Warmup behavior
 
-CUDA graph warmup выполняется **один раз на экземпляр модели**, не на каждый вызов:
+CUDA graph warmup runs **once per model instance**, not per call:
 
 ```python
-# Первый вызов — полный warmup (~8.5s)
+# First call — full warmup (~8.5s)
 model.generate_custom_voice_streaming(...)  # ~9.5s (warmup + gen)
 
-# Последующие вызовы — без warmup (~80ms prefill overhead)
+# Subsequent calls — no warmup (~80ms prefill overhead)
 model.generate_custom_voice_streaming(...)  # ~1.7s
 model.generate_custom_voice_streaming(...)  # ~0.96s
 ```
 
-**Почему ~80ms на последующих вызовах?**
+**Why ~80ms on subsequent calls?**
 1. `talker.forward()` initial prefill pass (~50-70ms)
 2. Tokenization + `_build_assistant_text` CPU work (~10-20ms)
 3. `prefill_kv()` copying DynamicCache → StaticCache
 
 ---
 
-## 5. Потоковая генерация (Streaming Pipeline)
+## 5. Streaming Generation (Streaming Pipeline)
 
-### Архитектура Producer-Consumer
+### Producer-Consumer Architecture
 
 ```
 ┌──────────────┐     queue      ┌──────────────┐
 │   PRODUCER   │ ────────────→  │    PLAYER    │
-│  (генерация) │                │ (sounddevice)│
+│  (generation)│                │(sounddevice) │
 │              │                │              │
 │  Segment 1   │                │ Chunk 1      │
 │  → Chunk 1   │                │ → play       │
@@ -421,9 +421,9 @@ model.generate_custom_voice_streaming(...)  # ~0.96s
 
 ### StreamingAudioPlayer
 
-Файл: `fast_tts_v14.py` (строки 47-138)
+File: `fast_tts_v14.py` (lines 47-138)
 
-Callback-based плеер на базе `sounddevice.OutputStream`:
+Callback-based player built on `sounddevice.OutputStream`:
 
 ```python
 class StreamingAudioPlayer:
@@ -431,21 +431,21 @@ class StreamingAudioPlayer:
         self._chunks = queue.Queue(maxsize=32)
         self._buffered = 0
         self._preroll = int(sample_rate * preroll_sec)  # 7200 samples
-        
+
     def start(self):
         self._stream = self.sd.OutputStream(
             samplerate=self.sample_rate, channels=1, dtype="float32",
             latency="high", callback=self._callback,
         )
         self._stream.start()
-        
+
     def _callback(self, outdata, frames, time_info, status):
-        # PortAudio callback — непрерывно подаём аудио
+        # PortAudio callback — continuously feed audio
         with self._lock:
             if not self._started:
                 if self._buffered >= self._preroll:
-                    self._started = True  # начинаем воспроизведение
-            
+                    self._started = True  # start playback
+
             while written < frames:
                 chunk = self._chunks.get_nowait()
                 out[written:written+n] = chunk[offset:offset+n]
@@ -453,19 +453,19 @@ class StreamingAudioPlayer:
 
 ### Text Segmentation
 
-Файл: `fast_tts_v14.py` (строки 28-56)
+File: `fast_tts_v14.py` (lines 28-56)
 
-Автоматическое разбиение длинных текстов на сегменты ≤85 символов:
+Automatic splitting of long text into segments ≤85 characters:
 
 ```python
 def split_segments(text, max_chars=85):
-    # 1. Разбиваем по предложениям (.!? )
+    # 1. Split by sentences (.!? )
     sentences = re.findall(r'([^.!?]+[.!?])|([^.!?]+$)', text)
-    
-    # 2. Длинные предложения — по запятым/точкам с многоточием
+
+    # 2. Long sentences — by commas/periods with ellipsis
     parts = re.split(r'(?<=[,;:])\s+', sentence)
-    
-    # 3. Если всё ещё длинно — по словам
+
+    # 3. If still too long — by words
     words = buf.split()
 ```
 
@@ -474,13 +474,13 @@ def split_segments(text, max_chars=85):
 ```python
 def generate_and_play(self, text, language='Russian', save_wav=None):
     segments = split_segments(text, max_chars=85)
-    
+
     player = StreamingAudioPlayer(sample_rate=24000, preroll_sec=0.3)
     player.start()
-    
+
     q = queue.Queue(maxsize=32)
-    
-    # PRODUCER: генерация в отдельном потоке
+
+    # PRODUCER: generation in separate thread
     def producer():
         for seg in segments:
             gen = self.model.generate_custom_voice_streaming(
@@ -489,78 +489,78 @@ def generate_and_play(self, text, language='Russian', save_wav=None):
             for audio_chunk, sr, timing in gen:
                 chunk = to_pcm_chunk(audio_chunk)
                 chunk = safe_normalize(chunk)  # clip protection
-                
-                # Backpressure: ждём пока очередь не освободится
+
+                # Backpressure: wait until queue has space
                 while q.qsize() >= 20:
                     time.sleep(0.01)
                 q.put(chunk)
             gen.close()
         q.put(None)  # sentinel
-    
+
     gen_thread = threading.Thread(target=producer, daemon=True)
     gen_thread.start()
-    
-    # CONSUMER: чтение из очереди → плеер
+
+    # CONSUMER: read from queue → player
     all_wavs = []
     while True:
         chunk = q.get(timeout=0.1)
         if chunk is None:
             break
-        
-        # Backpressure: ждём пока буфер плеера не опустеет
+
+        # Backpressure: wait until player buffer drains
         while player.buffered_seconds() > 3.5:
             time.sleep(0.01)
-        
+
         all_wavs.append(chunk)
         player.add_chunk(chunk)
-    
+
     gen_thread.join(timeout=120)
     player.add_chunk(None)  # signal end
 ```
 
-### Метрики в реальном времени
+### Real-time metrics
 
-| Метрика | Описание | Формула |
-|---------|----------|---------|
-| **TTFA** | Time To First Audio — время до первого звука | `first_chunk_time - start_time` |
-| **RTF** | Real-Time Factor — скорость генерации | `audio_duration / wall_time` |
-| **ms/step** | Время на один codec шаг | `wall_time / num_steps` |
-| **Inference Speed** | Насколько быстрее реалтайма | `audio_duration / compute_time` |
+| Metric | Description | Formula |
+|--------|-------------|---------|
+| **TTFA** | Time To First Audio — time until first sound | `first_chunk_time - start_time` |
+| **RTF** | Real-Time Factor — generation speed | `audio_duration / wall_time` |
+| **ms/step** | Time per codec step | `wall_time / num_steps` |
+| **Inference Speed** | How much faster than realtime | `audio_duration / compute_time` |
 
 ---
 
-## 6. Эволюция версий (v6 → v14)
+## 6. Version Evolution (v6 → v14)
 
-### Таблица эволюции
+### Evolution table
 
-| Версия | Ключевое изменение | Результат |
-|--------|-------------------|-----------|
-| **v6** | Producer-consumer pipeline, фикс underruns | Потоковая генерация без заиканий |
+| Version | Key change | Result |
+|---------|-----------|--------|
+| **v6** | Producer-consumer pipeline, fix underruns | Streaming without stuttering |
 | **v7** | Parallel generation (ThreadPoolExecutor) | — |
-| **v8** | `torch.compile` + chunked decode | Не сработало (динамические размеры) |
-| **v9** | StoppingCriteria patch + auto max_new_tokens | 1-3s для коротких фраз |
-| **v10** | CUDA Graphs backend (FasterQwen3TTS) | ~8x ускорение, RTF > 1.0 |
-| **v14** | True streaming + crossfade + segmentation | Плавный звук без щелчков |
+| **v8** | `torch.compile` + chunked decode | Didn't work (dynamic sizes) |
+| **v9** | StoppingCriteria patch + auto max_new_tokens | 1-3s for short phrases |
+| **v10** | CUDA Graphs backend (FasterQwen3TTS) | ~8× speedup, RTF > 1.0 |
+| **v14** | True streaming + crossfade + segmentation | Smooth sound without clicks |
 
-### Детали каждой версии
+### Details of each version
 
-#### v6 — Первый рабочий pipeline
+#### v6 — First working pipeline
 
 ```python
-# Ключевые фиксы:
-1. Producer thread генерирует сегменты, кладёт в очередь
-2. Main thread читает из очереди и кормит плеер
-3. player.add_chunk(None) ТОЛЬКО после завершения генерации
-4. trim_silence + apply_fades для плавных границ
+# Key fixes:
+1. Producer thread generates segments, puts into queue
+2. Main thread reads from queue and feeds player
+3. player.add_chunk(None) ONLY after generation completes
+4. trim_silence + apply_fades for smooth boundaries
 ```
 
-**Баг:** кроссфейд накапливал prev_audio после каждого чанка → звук умножался на N чанков.
+**Bug:** crossfade accumulated prev_audio after each chunk → sound multiplied by N chunks.
 
 #### v9 — StoppingCriteria fix
 
-**Проблема:** `max_new_tokens=8192` по умолчанию → модель генерирует 15+ секунд аудио для короткой фразы "Да".
+**Problem:** `max_new_tokens=8192` default → model generates 15+ seconds of audio for a short phrase "Yes".
 
-**Решение:**
+**Solution:**
 ```python
 def _get_max_new_tokens(self, text):
     word_count = len(re.findall(r'\b\w+\b', text))
@@ -570,61 +570,61 @@ def _get_max_new_tokens(self, text):
     else: return 160
 ```
 
-**Результат:** "Да" → 1.25s (было 15-27s)
+**Result:** "Yes" → 1.25s (was 15-27s)
 
-#### v10 — CUDA Graphs переход
+#### v10 — CUDA Graphs transition
 
-Переход на `FasterQwen3TTS` wrapper с CUDA graph capture:
-- ~8x ускорение декодирования
-- RTF > 1.0 (быстрее реалтайма)
-- TTFA ~350ms вместо ~40s
+Transition to `FasterQwen3TTS` wrapper with CUDA graph capture:
+- ~8× decoding speedup
+- RTF > 1.0 (faster than realtime)
+- TTFA ~350ms instead of ~40s
 
-#### v14 — Финальная версия
+#### v14 — Final version
 
 ```python
-# Ключевые улучшения vs v10:
-1. Crossfade между сегментами (плавные переходы)
+# Key improvements vs v10:
+1. Crossfade between segments (smooth transitions)
 2. Per-chunk normalization (consistent loudness)
 3. Backpressure control (queue + player buffer)
-4. MIN_START_SEC = 1.0s (ждем пока буфер наполнится)
-5. split_segments с умным разбиением по предложениям
+4. MIN_START_SEC = 1.0s (wait until buffer is full)
+5. split_segments with smart sentence-based splitting
 ```
 
 ---
 
-## 7. Сравнение с FasterQwen3TTS
+## 7. Comparison with FasterQwen3TTS
 
-### Архитектурные различия
+### Architectural differences
 
-| Аспект | Наша реализация | FasterQwen3TTS |
-|--------|-----------------|----------------|
-| **Базовая модель** | `Qwen3TTSModel` (native) | `Qwen3TTSModel` + wrapper |
-| **CUDA Graphs** | Кастомные `PredictorGraph`, `TalkerGraph` | Свои реализации в `faster_qwen3_tts/` |
+| Aspect | Our implementation | FasterQwen3TTS |
+|--------|-------------------|----------------|
+| **Base model** | `Qwen3TTSModel` (native) | `Qwen3TTSModel` + wrapper |
+| **CUDA Graphs** | Custom `PredictorGraph`, `TalkerGraph` | Own implementations in `faster_qwen3_tts/` |
 | **Streaming API** | `generate_custom_voice_streaming()` | `generate_custom_voice_streaming()` |
-| **Voice Cloning** | Не реализовано | Полная поддержка (ICL + x-vector) |
-| **Voice Design** | Не реализовано | Поддержка через `instruct` |
-| **CLI** | Нет | `faster-qwen3-tts` команда |
-| **Server mode** | Нет | OpenAI-compatible API сервер |
-| **GGML backend** | Нет | qwentts.cpp опционально |
+| **Voice Cloning** | Not implemented | Full support (ICL + x-vector) |
+| **Voice Design** | Not implemented | Supported via `instruct` |
+| **CLI** | None | `faster-qwen3-tts` command |
+| **Server mode** | None | OpenAI-compatible API server |
+| **GGML backend** | None | qwentts.cpp optional |
 
-### Ключевые отличия в реализации
+### Key implementation differences
 
-#### 1. Багфикс: non_streaming_mode forced
+#### 1. Bugfix: non_streaming_mode forced
 
-В native `Qwen3TTSModel` была ошибка (строка 1576 в оригинале):
+In native `Qwen3TTSModel` there was a bug (line 1576 in original):
 ```python
-# Было (баг):
+# Was (bug):
 non_streaming_mode=non_streaming_mode or True
 
-# Должно быть:
+# Should be:
 non_streaming_mode=non_streaming_mode if non_streaming_mode is not None else False
 ```
 
-Это вызывало повторение аудио при streaming генерации.
+This caused audio repetition during streaming generation.
 
-#### 2. Кроссфейд между сегментами
+#### 2. Crossfade between segments
 
-Наша реализация применяет кроссфейд на границах сегментов для плавных переходов:
+Our implementation applies crossfade at segment boundaries for smooth transitions:
 ```python
 def apply_fades(wav, sr=24000, in_ms=5, out_ms=25):
     n_in = int(sr * in_ms / 1000.0)
@@ -635,102 +635,102 @@ def apply_fades(wav, sr=24000, in_ms=5, out_ms=25):
 
 #### 3. Backpressure control
 
-Наш pipeline использует двойной backpressure:
-- **Producer side**: ждём пока очередь не освободится (`q.qsize() >= 20`)
-- **Consumer side**: ждём пока буфер плеера не опустеет (`buffered_seconds() > 3.5`)
+Our pipeline uses double backpressure:
+- **Producer side**: wait until queue has space (`q.qsize() >= 20`)
+- **Consumer side**: wait until player buffer drains (`buffered_seconds() > 3.5`)
 
 #### 4. Safe chunk copying
 
 ```python
 def to_pcm_chunk(x):
-    """Всегда real copy — защита от reuse static buffer."""
+    """Always real copy — protection against static buffer reuse."""
     if torch.is_tensor(x):
         x = x.detach().cpu().numpy()
     return np.array(x, dtype=np.float32, copy=True).reshape(-1)
 ```
 
-### Что FasterQwen3TTS делает лучше
+### What FasterQwen3TTS does better
 
-| Возможность | Описание |
-|-------------|----------|
-| **Voice Cloning** | ICL mode с reference audio + x-vector only mode |
-| **Voice Design** | Instruction-based генерация ("Warm, confident narrator") |
-| **CLI утилита** | `faster-qwen3-tts clone/design/custom` команды |
-| **OpenAI API** | Совместимый сервер для интеграции с клиентами |
-| **GGML backend** | Опциональный qwentts.cpp для CPU/low-memory |
-| **Speaker caching** | `.spk` / `.rvq` кэш для быстрого клонирования |
-| **Demo UI** | Веб-интерфейс с live TTFA/RTF метриками |
+| Feature | Description |
+|---------|-------------|
+| **Voice Cloning** | ICL mode with reference audio + x-vector only mode |
+| **Voice Design** | Instruction-based generation ("Warm, confident narrator") |
+| **CLI utility** | `faster-qwen3-tts clone/design/custom` commands |
+| **OpenAI API** | Compatible server for client integration |
+| **GGML backend** | Optional qwentts.cpp for CPU/low-memory |
+| **Speaker caching** | `.spk` / `.rvq` cache for fast cloning |
+| **Demo UI** | Web interface with live TTFA/RTF metrics |
 
-### Что наша реализация делает лучше
+### What our implementation does better
 
-| Возможность | Описание |
-|-------------|----------|
-| **Crossfade** | Плавные переходы между сегментами |
-| **Per-chunk normalization** | Consistent loudness без pumping |
-| **Простота** | Один файл, нет зависимостей от faster-qwen3-tts |
-| **Багфиксы** | Фикс non_streaming_mode forced bug |
+| Feature | Description |
+|---------|-------------|
+| **Crossfade** | Smooth transitions between segments |
+| **Per-chunk normalization** | Consistent loudness without pumping |
+| **Simplicity** | Single file, no dependency on faster-qwen3-tts |
+| **Bug fixes** | Fix for non_streaming_mode forced bug |
 
 ---
 
-## 8. Бенчмарки на RTX 5060 Ti
+## 8. Benchmarks on RTX 5060 Ti
 
-### Конфигурация
+### Configuration
 
-| Параметр | Значение |
-|----------|----------|
+| Parameter | Value |
+|-----------|-------|
 | GPU | NVIDIA GeForce RTX 5060 Ti (16GB) |
 | PyTorch | 2.13.0+cu132 |
 | CUDA | 13.2 |
 | Compute Capability | 12.0 |
-| Модель | Qwen3-TTS-0.6B @ bfloat16 |
-| Спикер | Sohee (Russian) |
-| Текст | ~130 codec токенов (~11s аудио) |
+| Model | Qwen3-TTS-0.6B @ bfloat16 |
+| Speaker | Sohee (Russian) |
+| Text | ~130 codec tokens (~11s audio) |
 
-### Результаты сравнения
+### Comparison results
 
-| Метрика | Plain (baseline) | CUDA Graphs | Ускорение |
-|---------|-----------------|-------------|-----------|
+| Metric | Plain (baseline) | CUDA Graphs | Speedup |
+|---------|-----------------|-------------|---------|
 | **ms/step** | 247.7ms | 31.3ms | **7.9x** |
 | **RTF** | 0.336 | 2.67 | **8.0x** |
 | **TTFA** | ~40,382ms | ~355ms | **113x** |
-| **Время на 11s аудио** | ~33.1s | ~4.2s | **7.9x** |
+| **Time for 11s audio** | ~33.1s | ~4.2s | **7.9x** |
 
-### Streaming сегменты (v10)
+### Streaming segments (v10)
 
-| Сегмент | Генерация | TTFA | Аудио | Чанков | RTF |
+| Segment | Generation | TTFA | Audio | Chunks | RTF |
 |---------|-----------|------|-------|--------|-----|
-| Меня зовут Александр. | 1376ms | 466ms | 2.48s | 4 | 1.80 |
-| Мне двадцать пять лет. | 1170ms | 389ms | 2.48s | 4 | 2.12 |
-| Я живу в Санкт-Петербурге. | 1420ms | 372ms | 2.96s | 5 | 2.08 |
+| My name is Alexander. | 1376ms | 466ms | 2.48s | 4 | 1.80 |
+| I am twenty-five years old. | 1170ms | 389ms | 2.48s | 4 | 2.12 |
+| I live in Saint Petersburg. | 1420ms | 372ms | 2.96s | 5 | 2.08 |
 
-**Итого:** 6.4s аудио за 8.0s wall time (RTF ~0.8 с учётом префиллов сегментов).
+**Total:** 6.4s audio in 8.0s wall time (RTF ~0.8 including segment prefills).
 
-### Почему RTF > 1.0 — это хорошо
+### Why RTF > 1.0 matters
 
 ```
 RTF = audio_duration / wall_time
 
-RTF < 1.0  → генерация медленнее реалтайма (ждем аудио)
-RTF = 1.0  → ровно в реальном времени
-RTF > 1.0  → быстрее реалтайма (опережаем воспроизведение)
+RTF < 1.0  → generation slower than realtime (waiting for audio)
+RTF = 1.0  → exactly realtime
+RTF > 1.0  → faster than realtime (ahead of playback)
 ```
 
-Наш результат **RTF 2.67** означает: модель генерирует аудио в 2.67 раза быстрее, чем оно воспроизводится. Это запас для обработки следующих сегментов и сетевых задержек.
+Our result **RTF 2.67** means: the model generates audio 2.67× faster than it plays back. This provides headroom for processing subsequent segments and network latency.
 
 ---
 
-## 9. Установка и запуск
+## 9. Installation and Running
 
-### Требования
+### Requirements
 
 ```
 Python >= 3.10
 PyTorch >= 2.5.1 (cu132)
 CUDA >= 12.8
-NVIDIA GPU с поддержкой CUDA Graphs
+NVIDIA GPU with CUDA Graphs support
 ```
 
-### Установка flash-attn (Windows + CUDA 13.2)
+### Installing flash-attn (Windows + CUDA 13.2)
 
 ```cmd
 set "CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
@@ -739,14 +739,14 @@ set "MAX_JOBS=10"
 python flash-attention/setup.py build_ext --inplace
 ```
 
-**Важно:** Для CUDA 13.2 + MSVC 14.43 нужен фикс в `setup.py`:
+**Important:** For CUDA 13.2 + MSVC 14.43, a fix is needed in `setup.py`:
 ```python
-# Добавить при sys.platform == "win32":
+# Add when sys.platform == "win32":
 compiler_c17_flag.append("/Zc:preprocessor")
 feature_flags.append("-DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING")
 ```
 
-### Быстрый старт
+### Quick start
 
 ```python
 from fast_tts_v14 import FastTTSv14
@@ -757,25 +757,25 @@ tts = FastTTSv14(
 )
 
 tts.generate_and_play(
-    text="Привет! Это тест потоковой генерации.",
-    language='Russian',
+    text="Hello! This is a streaming TTS test.",
+    language='English',
     save_wav='output.wav'
 )
 ```
 
-### Тестовый набор (10 предложений)
+### Test suite (10 sentences)
 
 ```bash
 python fast_tts_v14.py --test
 ```
 
-Запускает 5 русских + 5 английских абзацев, сохраняет WAV файлы.
+Runs 5 Russian + 5 English paragraphs, saves WAV files.
 
 ---
 
-## 10. Ключевые паттерны кода
+## 10. Key Code Patterns
 
-### Паттерн 1: Producer-Consumer для streaming
+### Pattern 1: Producer-Consumer for streaming
 
 ```python
 q = queue.Queue(maxsize=32)
@@ -793,57 +793,57 @@ for chunk in iter(lambda: q.get(), None):
     play(chunk)
 ```
 
-### Паттерн 2: CUDA Graph capture/replay
+### Pattern 2: CUDA Graph capture/replay
 
 ```python
-# Capture (один раз)
+# Capture (once)
 stream = torch.cuda.Stream()
 with torch.cuda.graph(graph, stream=stream):
     output = model.forward(input_buf)
 
-# Replay (каждый шаг)
+# Replay (each step)
 input_buf.copy_(new_input)
-graph.replay()  # без Python overhead!
+graph.replay()  # no Python overhead!
 ```
 
-### Паттерн 3: StaticCache для фиксированного KV
+### Pattern 3: StaticCache for fixed KV
 
 ```python
 from transformers import StaticCache
 
 cache = StaticCache(config=config, max_cache_len=2048)
 
-# Prefill — копируем динамический cache в статический
+# Prefill — copy dynamic cache into static
 for layer_idx in range(num_layers):
     k, v = dynamic_kv[layer_idx]
     pos = torch.arange(k.shape[2], device=device)
     cache.update(k, v, layer_idx, {"cache_position": pos})
 
-# Decode — просто обновляем cache_position
+# Decode — just update cache_position
 cache_position = torch.tensor([current_pos], device=device)
-output = model.forward(input_embeds, past_key_values=cache, 
+output = model.forward(input_embeds, past_key_values=cache,
                        cache_position=cache_position)
 ```
 
-### Паттерн 4: Safe tensor copying от static buffer reuse
+### Pattern 4: Safe tensor copying from static buffer reuse
 
 ```python
 def to_pcm_chunk(x):
-    """Всегда real copy — защита от перезаписи static buffer."""
+    """Always real copy — protection against static buffer overwrite."""
     if torch.is_tensor(x):
         x = x.detach().cpu().numpy()
     return np.array(x, dtype=np.float32, copy=True).reshape(-1)
 ```
 
-### Паттерн 5: Backpressure control
+### Pattern 5: Backpressure control
 
 ```python
-# Producer side — не перегружаем очередь
+# Producer side — don't overload the queue
 while q.qsize() >= max_queue_size:
     time.sleep(0.01)
 q.put(chunk)
 
-# Consumer side — не перегружаем плеер
+# Consumer side — don't overload the player
 while player.buffered_seconds() > max_buffer_sec:
     time.sleep(0.01)
 player.add_chunk(chunk)
@@ -851,44 +851,44 @@ player.add_chunk(chunk)
 
 ---
 
-## Приложения
+## Appendices
 
-### A. Ссылки на файлы
+### A. File references
 
-| Файл | Описание |
-|------|----------|
-| `fast_tts_v14.py` | Финальная потоковая реализация |
+| File | Description |
+|------|-------------|
+| `fast_tts_v14.py` | Final streaming implementation |
 | `fast_tts_v10.py` | CUDA Graphs + streaming pipeline |
-| `streaming_tts_v6.py` | Первый рабочий producer-consumer |
+| `streaming_tts_v6.py` | First working producer-consumer |
 | `qwen_tts_cuda_graphs/predictor_graph.py` | Predictor CUDA graph |
 | `qwen_tts_cuda_graphs/talker_graph.py` | Talker CUDA graph |
-| `docs/cuda_graphs_optimization.md` | Детальный разбор оптимизации |
-| `bench_faster_custom_voice.py` | Бенчмарк скрипт |
-| `bench_comparison.json` | Результаты бенчмарков |
+| `docs/cuda_graphs_optimization.md` | Detailed optimization breakdown |
+| `bench_faster_custom_voice.py` | Benchmark script |
+| `bench_comparison.json` | Benchmark results |
 
-### B. Полезные команды
+### B. Useful commands
 
 ```bash
-# Запуск с текстом из аргументов
-python fast_tts_v14.py "Привет мир"
+# Run with text from arguments
+python fast_tts_v14.py "Hello world"
 
-# Тестовый набор (10 предложений)
+# Test suite (10 sentences)
 python fast_tts_v14.py --test
 
-# Бенчмарк Faster vs Plain
+# Benchmark Faster vs Plain
 python bench_faster_custom_voice.py
 
-# Проверка CUDA availability
+# Check CUDA availability
 python -c "import torch; print(torch.cuda.is_available())"
 ```
 
-### C. Известные ограничения
+### C. Known limitations
 
-1. **max_seq_len = 2048** — ограничивает длину префилла (текст + reference audio)
-2. **Batch size = 1** — CUDA graphs не поддерживают динамический batch
-3. **Только NVIDIA GPU** — требуется CUDA и поддержка CUDAGraph
-4. **PyTorch >= 2.5.1** — для стабильного capture
+1. **max_seq_len = 2048** — limits prefill length (text + reference audio)
+2. **Batch size = 1** — CUDA graphs don't support dynamic batch
+3. **NVIDIA GPU only** — requires CUDA and CUDAGraph support
+4. **PyTorch >= 2.5.1** — for stable capture
 
 ---
 
-*Документ создан на основе анализа реализации в `fast_tts_v14.py` и сравнения с `faster-qwen3-tts`.*
+*Document created based on analysis of the implementation in `fast_tts_v14.py` and comparison with `faster-qwen3-tts`.*
