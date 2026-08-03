@@ -113,5 +113,5 @@ qwen-tts-streaming/
 
 ## License
 
-- Оптимизации CUDA Graphs — **MIT**, адаптировано из [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts)
-- Базовая модель Qwen3-TTS — **Apache 2.0**, [Alibaba Group / QwenLM](https://github.com/QwenLM/Qwen3-TTS)
+Код оптимизаций — MIT (адаптировано из faster-qwen3-tts).
+Базовая модель — Qwen3-TTS (Apache 2.0, Alibaba Group).
