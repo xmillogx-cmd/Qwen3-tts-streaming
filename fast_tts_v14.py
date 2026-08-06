@@ -248,15 +248,21 @@ class FastTTSv14:
         print("[V14] Preflight warmup (all chunk sizes)...", flush=True)
         t0 = time.perf_counter()
 
+        # Warmup texts covering all supported languages — ensures CUDA graphs
+        # and language-specific embedding paths are captured before first real call.
         warmup_texts = {
-            'Russian': "Привет! Как дела? Я живу в Москве. Это тест потоковой генерации речи.",
-            'English': "Hello! How are you doing today? This is a test of streaming speech generation.",
+            'Russian':   "Привет! Как дела? Я живу в Москве. Это тест потоковой генерации речи.",
+            'English':   "Hello! How are you doing today? This is a test of streaming speech generation.",
+            'German':    "Hallo! Wie geht es dir? Ich wohne in Berlin und arbeite als Softwareentwickler.",
+            'Spanish':   "Hola! ¿Cómo estás? Vivo en Madrid y trabajo como ingeniero de software.",
+            'French':    "Bonjour! Comment allez-vous? Je vis à Paris et je travaille comme développeur.",
+            'Chinese':   "你好！我叫李明。我住在北京，是一名软件工程师。",
         }
 
-        for lang in ['Russian', 'English']:
+        for lang, text in warmup_texts.items():
             for chunk_size in [2, 4, 8]:
                 gen = self.model.generate_custom_voice_streaming(
-                    text=warmup_texts[lang],
+                    text=text,
                     speaker=self.speaker,
                     language=lang,
                     chunk_size=chunk_size,
@@ -269,7 +275,8 @@ class FastTTSv14:
 
         torch.cuda.synchronize()
         warmup_ms = (time.perf_counter() - t0) * 1000
-        print(f"[V14] Warmup: {warmup_ms:.0f}ms | Ready!", flush=True)
+        langs_list = ', '.join(warmup_texts.keys())
+        print(f"[V14] Warmup: {warmup_ms:.0f}ms | Languages warmed up: {langs_list}", flush=True)
 
         # fixed: create player once and reuse across generate_and_play calls
         self.player = StreamingAudioPlayer(sample_rate=24000, device_id=device_id, preroll_sec=0.3)
