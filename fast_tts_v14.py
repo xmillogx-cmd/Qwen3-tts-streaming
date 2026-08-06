@@ -7,7 +7,7 @@ Fast TTS v14 — True Streaming Playback
 - Global RMS normalization for consistent loudness across chunks
 - Live speaker output via sounddevice
 """
-import argparse, re, sys, threading, time, queue
+import argparse, os, re, sys, threading, time, queue
 import numpy as np
 import torch
 import soundfile as sf
@@ -278,7 +278,8 @@ class FastTTSv14:
         else: return 160
 
     @torch.inference_mode()
-    def generate_and_play(self, text, language='Russian', save_wav=None):
+    def generate_and_play(self, text, language='Russian', save_wav=None,
+                          chunk_size=8, min_start_sec=0.15):
         """True streaming: producer thread -> queue -> player."""
         segments = split_segments(text, max_chars=85)
         print(f"\n[V14] Generating {len(segments)} segments:", flush=True)
@@ -296,7 +297,6 @@ class FastTTSv14:
 
         # TTFA tracking
         first_chunk_time = [None]
-        MIN_START_SEC = 1.0   # 1s preroll for smooth playback
         started = [False]
         chunk_count_ref = [0]
         all_wavs = []
@@ -314,7 +314,7 @@ class FastTTSv14:
                         text=seg,
                         speaker=self.speaker,
                         language=language,
-                        chunk_size=8,
+                        chunk_size=chunk_size,
                         max_new_tokens=max_tokens,
                         backend='auto',
                     )
@@ -381,7 +381,7 @@ class FastTTSv14:
 
             # Start playback when buffer is warm
             if not started[0]:
-                if self.player.buffered_seconds() >= MIN_START_SEC:
+                if self.player.buffered_seconds() >= min_start_sec:
                     self.player.request_start()
                     started[0] = True
 
@@ -423,9 +423,19 @@ def main():
     parser = argparse.ArgumentParser(description='Fast TTS v14 — Streaming playback')
     parser.add_argument('--model', default=os.getenv('MODEL_PATH', r'G:\Foundation\models\Qwen3-TTS'),
                         help='Path to Qwen3-TTS model directory')
-    parser.add_argument('--speaker', default='Sohee')
+    parser.add_argument('--speaker', default='Sohee',
+                        help='Speaker name (default: Sohee)')
     parser.add_argument('--text', nargs='*', help='Text to synthesize (or use default)')
+    parser.add_argument('--chunk-size', type=int, default=8, choices=[2, 4, 8],
+                        help='Audio chunk size in tokens (default: 8)')
+    parser.add_argument('--min-start-sec', type=float, default=0.15,
+                        help='Minimum buffered seconds before playback starts (default: 0.15)')
     args = parser.parse_args()
+
+    if not os.path.exists(args.model):
+        print(f"Error: model path not found: {args.model}", flush=True)
+        print("Hint: specify --model <path> or set MODEL_PATH env var", flush=True)
+        sys.exit(1)
 
     text = ' '.join(args.text) if args.text else (
         "Привет! Это тест потоковой генерации. Звук должен быть плавным без щелчков!"
@@ -437,9 +447,11 @@ def main():
 
     tts = FastTTSv14(args.model, speaker=args.speaker)
     try:
-        tts.generate_and_play(text, save_wav='tts_output_v14.wav')
+        tts.generate_and_play(text, save_wav='tts_output_v14.wav',
+                              chunk_size=args.chunk_size, min_start_sec=args.min_start_sec)
     except KeyboardInterrupt:
         print("\n[V14] Interrupted.", flush=True)
+        sys.exit(0)
     finally:
         tts.player.stop()
 
@@ -449,8 +461,12 @@ def main():
 # ============================================================================
 def run_test_suite():
     """Run test suite with 10 sentences for audio verification."""
-    import os
     model_path = os.getenv('MODEL_PATH', r'G:\Foundation\models\Qwen3-TTS')
+
+    if not os.path.exists(model_path):
+        print(f"Error: model path not found: {model_path}", flush=True)
+        print("Hint: set MODEL_PATH env var to your Qwen3-TTS model directory", flush=True)
+        sys.exit(1)
 
     print(f"GPU: {torch.cuda.get_device_name(0)}", flush=True)
     print(f"PyTorch: {torch.__version__}", flush=True)
