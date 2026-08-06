@@ -1,8 +1,14 @@
 """Test v14 — Streaming playback with proper warmup."""
-import torch, time, numpy as np, soundfile as sf, sounddevice as sd, sys, threading, queue
+import argparse, os, torch, time, numpy as np, soundfile as sf, sounddevice as sd, sys, threading, queue
 
-model_path = r'G:\Foundation\models\Qwen3-TTS'
-speaker = 'Sohee'
+parser = argparse.ArgumentParser(description='TTS v14 streaming test suite')
+parser.add_argument('--model', default=os.getenv('MODEL_PATH', r'G:\Foundation\models\Qwen3-TTS'),
+                    help='Path to Qwen3-TTS model directory')
+parser.add_argument('--speaker', default='Sohee')
+args = parser.parse_args()
+
+model_path = args.model
+speaker = args.speaker
 
 sentences = [
     # Russian

@@ -421,7 +421,7 @@ class FastTTSv14:
 # ============================================================================
 def main():
     parser = argparse.ArgumentParser(description='Fast TTS v14 — Streaming playback')
-    parser.add_argument('--model', default=r'G:\Foundation\models\Qwen3-TTS',
+    parser.add_argument('--model', default=os.getenv('MODEL_PATH', r'G:\Foundation\models\Qwen3-TTS'),
                         help='Path to Qwen3-TTS model directory')
     parser.add_argument('--speaker', default='Sohee')
     parser.add_argument('--text', nargs='*', help='Text to synthesize (or use default)')
