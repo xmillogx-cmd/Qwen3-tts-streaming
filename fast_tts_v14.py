@@ -7,7 +7,17 @@ Fast TTS v14 — True Streaming Playback
 - Global RMS normalization for consistent loudness across chunks
 - Live speaker output via sounddevice
 """
-import argparse, os, re, sys, threading, time, queue
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+import threading
+import time
+import queue
+from typing import Optional, List
+
 import numpy as np
 import torch
 import soundfile as sf
@@ -17,14 +27,14 @@ import sounddevice as sd
 # ============================================================================
 # HELPERS
 # ============================================================================
-def to_pcm_chunk(x):
+def to_pcm_chunk(x) -> np.ndarray:
     """Safely convert audio chunk to float32 PCM."""
     if torch.is_tensor(x):
         x = x.detach().cpu().numpy()
     return np.asarray(x, dtype=np.float32).reshape(-1)
 
 
-def global_normalize(audio_chunks, limit=0.95):
+def global_normalize(audio_chunks: List[np.ndarray], limit: float = 0.95) -> List[np.ndarray]:
     """Normalize all chunks together by global peak to avoid loudness pumping."""
     if not audio_chunks:
         return audio_chunks
@@ -36,7 +46,7 @@ def global_normalize(audio_chunks, limit=0.95):
     return audio_chunks
 
 
-def split_segments(text, max_chars=85):
+def split_segments(text: str, max_chars: int = 85) -> List[str]:
     """Split text into segments of at most max_chars characters.
 
     Splits on sentence boundaries first (.!?), then on commas/semicolons/colons,
@@ -86,7 +96,7 @@ def split_segments(text, max_chars=85):
 # STREAMING AUDIO PLAYER (callback-based)
 # ============================================================================
 class StreamingAudioPlayer:
-    def __init__(self, sample_rate=24000, device_id=None, blocksize=1024, preroll_sec=0.3):
+    def __init__(self, sample_rate: int = 24000, device_id: Optional[int] = None, blocksize: int = 1024, preroll_sec: float = 0.3) -> None:
         self.sample_rate = sample_rate
         if device_id is None:
             devices = sd.query_devices()
@@ -120,7 +130,7 @@ class StreamingAudioPlayer:
         )
         self._stream.start()
 
-    def _callback(self, outdata, frames, time_info, status):
+    def _callback(self, outdata: np.ndarray, frames: int, time_info, status) -> None:
         out = outdata[:, 0]
         out.fill(0.0)
         with self._lock:
@@ -154,7 +164,7 @@ class StreamingAudioPlayer:
                     pass
                 self._finished.set()
 
-    def add_chunk(self, chunk):
+    def add_chunk(self, chunk: Optional[np.ndarray]) -> None:
         """Accepts pre-normalized float32 PCM chunks. Blocks if queue is full."""
         if chunk is None:
             with self._lock:
@@ -174,21 +184,21 @@ class StreamingAudioPlayer:
             except queue.Full:
                 time.sleep(0.005)
 
-    def buffered_seconds(self):
+    def buffered_seconds(self) -> float:
         with self._lock:
             return self._buffered / float(self.sample_rate)
 
-    def request_start(self):
+    def request_start(self) -> None:
         with self._lock:
             self._started = True
 
-    def is_finished(self):
+    def is_finished(self) -> bool:
         return self._finished.is_set()
 
-    def wait(self, timeout=None):
+    def wait(self, timeout: Optional[float] = None) -> bool:
         return self._finished.wait(timeout)
 
-    def stop(self, timeout=5.0):
+    def stop(self, timeout: float = 5.0) -> None:
         with self._lock:
             self._done = True
         self.wait(timeout)
@@ -200,7 +210,7 @@ class StreamingAudioPlayer:
                 pass
         print(f"  [Audio] Underruns: {self._underruns}", flush=True)
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset player state for reuse without reopening the stream."""
         with self._lock:
             # fixed: drain queue properly instead of touching internal .queue
@@ -223,7 +233,7 @@ class StreamingAudioPlayer:
 class FastTTSv14:
     """Fast streaming TTS with true producer-consumer pipeline."""
 
-    def __init__(self, model_path, device='cuda:0', speaker='Sohee', device_id=None):
+    def __init__(self, model_path: str, device: str = 'cuda:0', speaker: str = 'Sohee', device_id: Optional[int] = None) -> None:
         self.device = device
         self.speaker = speaker
         print(f"[V14] Loading Qwen3TTSModel from {model_path}...", flush=True)
@@ -285,7 +295,7 @@ class FastTTSv14:
         import atexit
         atexit.register(self.player.stop)
 
-    def _get_max_new_tokens(self, text):
+    def _get_max_new_tokens(self, text: str) -> int:
         word_count = len(re.findall(r'\b\w+\b', text))
         if word_count <= 2: return 20
         elif word_count <= 5: return 50
@@ -293,8 +303,8 @@ class FastTTSv14:
         else: return 160
 
     @torch.inference_mode()
-    def generate_and_play(self, text, language='Russian', save_wav=None,
-                          chunk_size=8, min_start_sec=0.15):
+    def generate_and_play(self, text: str, language: str = 'Russian', save_wav: Optional[str] = None,
+                          chunk_size: int = 8, min_start_sec: float = 0.15) -> None:
         """True streaming: producer thread -> queue -> player."""
         segments = split_segments(text, max_chars=85)
         print(f"\n[V14] Generating {len(segments)} segments:", flush=True)
