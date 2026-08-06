@@ -44,6 +44,9 @@ Thumbs.db
 # Model checkpoints (too large)
 # Add specific model dirs if needed
 
+# Reference repos (not part of the project)
+faster-qwen3-tts/
+
 # Large binary assets
 *.pdf
 *.npz
