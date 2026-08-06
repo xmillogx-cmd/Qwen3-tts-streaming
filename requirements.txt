@@ -1,0 +1,13 @@
+# Core TTS dependencies
+qwen-tts>=0.1.1
+transformers>=4.57,<5
+accelerate
+torchaudio
+
+# Audio playback and I/O
+soundfile
+sounddevice
+numpy
+
+# Note: SDPA attention is used by default — compatible with CUDA graphs.
+# Flash Attention 2 is NOT compatible with CUDA graph capture.

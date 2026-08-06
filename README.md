@@ -10,7 +10,12 @@ A streaming speech synthesis engine built on **Qwen3-TTS-0.6B** with **CUDA Grap
 |-----------|-------------|
 | `fast_tts_v14.py` | Final implementation — true streaming via native `generate_custom_voice_streaming` + crossfade |
 | `qwen_tts_cuda_graphs/` | Custom `PredictorGraph` and `TalkerGraph` — ported from [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) with adaptation for native `qwen_tts` |
-| `test_native.py`, `test_v14.py` | Tests for native API and v14 |
+| `run_native.py` | Quick test of native Qwen3TTSModel streaming API |
+| `run_faster.py` | Quick test of FasterQwen3TTS (CUDA graphs) streaming API |
+| `bench_sdpa.py` | SDPA attention performance benchmark |
+| `debug_graphs.py` | CUDA graph timing diagnostics |
+| `test_v14.py` | Full test suite — 10 sentences with playback verification |
+| `*.bat` | Windows launchers (double-click or from terminal) |
 | `docs/` | Technical documentation on optimizations |
 
 ### Results on RTX 5060 Ti (CC 12.0)
@@ -49,7 +54,10 @@ git submodule update --init --recursive
 #### Dependencies
 
 ```bash
-# Core dependencies
+# Using the bundled .conda environment (recommended on Windows)
+G:\qwen-tts\.conda\python.exe -m pip install -r requirements.txt
+
+# Or with your own venv
 pip install -U qwen-tts transformers accelerate torchaudio soundfile sounddevice
 
 # Note: SDPA attention is used by default — it's compatible with CUDA graphs.
@@ -57,6 +65,27 @@ pip install -U qwen-tts transformers accelerate torchaudio soundfile sounddevice
 ```
 
 ### Quick start
+
+#### From terminal (with --model flag)
+
+```bash
+G:\qwen-tts\.conda\python.exe run_native.py --text "Hello world"
+G:\qwen-tts\.conda\python.exe run_faster.py --text "Привет мир"
+G:\qwen-tts\.conda\python.exe bench_sdpa.py
+G:\qwen-tts\.conda\python.exe test_v14.py
+```
+
+#### From Windows launcher (.bat files)
+
+```cmd
+run_native.bat --text "Hello world"
+run_faster.bat
+bench_sdpa.bat
+test_v14.bat
+fast_tts.bat --text "Привет мир"
+```
+
+#### In Python
 
 ```python
 from fast_tts_v14 import FastTTSv14
@@ -75,13 +104,18 @@ tts.generate_and_play("Hello! This is a streaming TTS test.")
 ```
 qwen-tts-streaming/
 ├── fast_tts_v14.py             # Final version — true streaming + crossfade
+├── run_native.py               # Quick test: native Qwen3TTSModel API
+├── run_faster.py               # Quick test: FasterQwen3TTS (CUDA graphs)
+├── bench_sdpa.py               # SDPA attention benchmark
+├── debug_graphs.py             # CUDA graph timing diagnostics
+├── test_v14.py                 # Full test suite — 10 sentences + playback
+├── requirements.txt            # Python dependencies
+├── *.bat                       # Windows launchers (double-click friendly)
 ├── qwen_tts_cuda_graphs/       # CUDA Graph optimizations
 │   ├── __init__.py
 │   ├── predictor_graph.py      # 15-step predictor loop capture
 │   ├── talker_graph.py         # Single-token talker decode capture
 │   └── sampling.py             # Token sampling utilities
-├── test_native.py              # Test for native generate_custom_voice_streaming
-├── test_v14.py                 # v14 test (10 sentences)
 ├── docs/
 │   ├── cuda_graphs_optimization.md  # Detailed CUDA Graphs breakdown
 │   └── qwen3-tts-implementation.md  # Architecture and version history
@@ -128,7 +162,12 @@ Text → split_segments() → generate_custom_voice_streaming() × N segments
 |-----------|----------|
 | `fast_tts_v14.py` | Финальная реализация — true streaming через нативный `generate_custom_voice_streaming` + кроссфейд |
 | `qwen_tts_cuda_graphs/` | Кастомные `PredictorGraph` и `TalkerGraph` — перенесены из [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) с адаптацией под нативный `qwen_tts` |
-| `test_native.py`, `test_v14.py` | Тесты нативного API и v14 |
+| `run_native.py` | Быстрый тест нативного API Qwen3TTSModel |
+| `run_faster.py` | Быстрый тест FasterQwen3TTS (CUDA graphs) |
+| `bench_sdpa.py` | Бенчмарк SDPA attention |
+| `debug_graphs.py` | Дебаг таймингов CUDA graph |
+| `test_v14.py` | Полный тест — 10 предложений с проигрыванием |
+| `*.bat` | Windows-лаунчеры (двойной клик или из терминала) |
 | `docs/` | Техническая документация по оптимизациям |
 
 ### Результаты на RTX 5060 Ti (CC 12.0)
@@ -167,7 +206,10 @@ git submodule update --init --recursive
 #### Зависимости
 
 ```bash
-# Базовые зависимости
+# Через встроенный .conda (рекомендуется на Windows)
+G:\qwen-tts\.conda\python.exe -m pip install -r requirements.txt
+
+# Или через свой venv
 pip install -U qwen-tts transformers accelerate torchaudio soundfile sounddevice
 
 # Примечание: используется SDPA attention по умолчанию — совместима с CUDA graphs.
@@ -175,6 +217,27 @@ pip install -U qwen-tts transformers accelerate torchaudio soundfile sounddevice
 ```
 
 ### Быстрый старт
+
+#### Из терминала (с флагом --model)
+
+```bash
+G:\qwen-tts\.conda\python.exe run_native.py --text "Hello world"
+G:\qwen-tts\.conda\python.exe run_faster.py --text "Привет мир"
+G:\qwen-tts\.conda\python.exe bench_sdpa.py
+G:\qwen-tts\.conda\python.exe test_v14.py
+```
+
+#### Из Windows-лаунчеров (.bat файлы)
+
+```cmd
+run_native.bat --text "Hello world"
+run_faster.bat
+bench_sdpa.bat
+test_v14.bat
+fast_tts.bat --text "Привет мир"
+```
+
+#### В Python
 
 ```python
 from fast_tts_v14 import FastTTSv14
@@ -193,13 +256,18 @@ tts.generate_and_play("Привет! Это тест потокового син
 ```
 qwen-tts-streaming/
 ├── fast_tts_v14.py             # Финальная версия — true streaming + crossfade
+├── run_native.py               # Быстрый тест нативного API Qwen3TTSModel
+├── run_faster.py               # Быстрый тест FasterQwen3TTS (CUDA graphs)
+├── bench_sdpa.py               # Бенчмарк SDPA attention
+├── debug_graphs.py             # Дебаг таймингов CUDA graph
+├── test_v14.py                 # Полный тест — 10 предложений + проигрывание
+├── requirements.txt            # Python зависимости
+├── *.bat                       # Windows-лаунчеры (двойной клик)
 ├── qwen_tts_cuda_graphs/       # CUDA Graph оптимизации
 │   ├── __init__.py
 │   ├── predictor_graph.py      # 15-step predictor loop capture
 │   ├── talker_graph.py         # Single-token talker decode capture
 │   └── sampling.py             # Token sampling utilities
-├── test_native.py              # Тест нативного generate_custom_voice_streaming
-├── test_v14.py                 # Тест v14 (10 предложений)
 ├── docs/
 │   ├── cuda_graphs_optimization.md  # Детальный разбор CUDA Graphs
 │   └── qwen3-tts-implementation.md  # Архитектура и эволюция версий
