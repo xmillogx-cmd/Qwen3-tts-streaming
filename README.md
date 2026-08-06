@@ -8,7 +8,7 @@ A streaming speech synthesis engine built on **Qwen3-TTS-0.6B** with **CUDA Grap
 
 | Component | Description |
 |-----------|-------------|
-| `fast_tts_v14.py` | Final implementation — true streaming via native `generate_custom_voice_streaming` + crossfade |
+| `fast_tts_v14.py` | Final implementation — true streaming via native `generate_custom_voice_streaming`, seamless chunk concatenation |
 | `qwen_tts_cuda_graphs/` | Custom `PredictorGraph` and `TalkerGraph` — ported from [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) with adaptation for native `qwen_tts` |
 | `run_native.py` | Quick test of native Qwen3TTSModel streaming API |
 | `run_faster.py` | Quick test of FasterQwen3TTS (CUDA graphs) streaming API |
@@ -37,7 +37,7 @@ A streaming speech synthesis engine built on **Qwen3-TTS-0.6B** with **CUDA Grap
 - Native `generate_custom_voice_streaming()` — no manual token management
 - Producer-consumer architecture: generation thread → queue → player
 - Automatic long-text segmentation via `split_segments()`
-- Crossfade between chunks for smooth transitions
+- Seamless chunk concatenation (stateful generation preserves phase continuity)
 - 0.3s preroll — audio starts in ~350ms
 
 ### Installation
@@ -103,7 +103,7 @@ tts.generate_and_play("Hello! This is a streaming TTS test.")
 
 ```
 qwen-tts-streaming/
-├── fast_tts_v14.py             # Final version — true streaming + crossfade
+├── fast_tts_v14.py             # Final version — true streaming, seamless chunk concatenation
 ├── run_native.py               # Quick test: native Qwen3TTSModel API
 ├── run_faster.py               # Quick test: FasterQwen3TTS (CUDA graphs)
 ├── bench_sdpa.py               # SDPA attention benchmark
@@ -134,7 +134,7 @@ Text → split_segments() → generate_custom_voice_streaming() × N segments
                                       ↓
                     Producer thread → queue → StreamingAudioPlayer
                                       ↓
-                    Crossfade chunks → Live playback @24kHz
+                    Concatenate chunks (stateful) → Live playback @24kHz
 ```
 
 ### Dependencies
@@ -160,7 +160,7 @@ Text → split_segments() → generate_custom_voice_streaming() × N segments
 
 | Компонент | Описание |
 |-----------|----------|
-| `fast_tts_v14.py` | Финальная реализация — true streaming через нативный `generate_custom_voice_streaming` + кроссфейд |
+| `fast_tts_v14.py` | Финальная реализация — true streaming через нативный `generate_custom_voice_streaming`, бесшовная склейка чанков |
 | `qwen_tts_cuda_graphs/` | Кастомные `PredictorGraph` и `TalkerGraph` — перенесены из [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) с адаптацией под нативный `qwen_tts` |
 | `run_native.py` | Быстрый тест нативного API Qwen3TTSModel |
 | `run_faster.py` | Быстрый тест FasterQwen3TTS (CUDA graphs) |
@@ -189,7 +189,7 @@ Text → split_segments() → generate_custom_voice_streaming() × N segments
 - Нативный `generate_custom_voice_streaming()` — без ручного управления токенами
 - Producer-consumer архитектура: поток генерации → очередь → плеер
 - Автоматическое разбиение длинного текста на сегменты (`split_segments`)
-- Crossfade между чанками для плавного перехода
+- Бесшовная склейка чанков (stateful generation сохраняет фазовую непрерывность)
 - Преролл 0.3s — звук появляется через ~350ms
 
 ### Установка
@@ -255,7 +255,7 @@ tts.generate_and_play("Привет! Это тест потокового син
 
 ```
 qwen-tts-streaming/
-├── fast_tts_v14.py             # Финальная версия — true streaming + crossfade
+├── fast_tts_v14.py             # Финальная версия — true streaming, бесшовная склейка чанков
 ├── run_native.py               # Быстрый тест нативного API Qwen3TTSModel
 ├── run_faster.py               # Быстрый тест FasterQwen3TTS (CUDA graphs)
 ├── bench_sdpa.py               # Бенчмарк SDPA attention
@@ -286,7 +286,7 @@ qwen-tts-streaming/
                                       ↓
                     Producer thread → queue → StreamingAudioPlayer
                                       ↓
-                    Crossfade chunks → Live playback @24kHz
+                    Concatenate chunks (stateful) → Live playback @24kHz
 ```
 
 ### Зависимости

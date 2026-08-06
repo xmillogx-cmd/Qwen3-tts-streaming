@@ -227,7 +227,12 @@ class FastTTSv14:
         self.device = device
         self.speaker = speaker
         print(f"[V14] Loading Qwen3TTSModel from {model_path}...", flush=True)
-        from qwen_tts import Qwen3TTSModel
+        try:
+            from qwen_tts import Qwen3TTSModel
+        except ImportError:
+            print("Error: 'qwen_tts' package not found.", flush=True)
+            print("Install it: pip install -U qwen-tts", flush=True)
+            sys.exit(1)
 
         t0 = time.perf_counter()
         self.model = Qwen3TTSModel.from_pretrained(
@@ -269,6 +274,9 @@ class FastTTSv14:
         # fixed: create player once and reuse across generate_and_play calls
         self.player = StreamingAudioPlayer(sample_rate=24000, device_id=device_id, preroll_sec=0.3)
         self.player.start()
+
+        import atexit
+        atexit.register(self.player.stop)
 
     def _get_max_new_tokens(self, text):
         word_count = len(re.findall(r'\b\w+\b', text))
@@ -428,8 +436,8 @@ def main():
     parser.add_argument('--text', nargs='*', help='Text to synthesize (or use default)')
     parser.add_argument('--chunk-size', type=int, default=8, choices=[2, 4, 8],
                         help='Audio chunk size in tokens (default: 8)')
-    parser.add_argument('--min-start-sec', type=float, default=1.0,
-                        help='Minimum buffered seconds before playback starts (default: 1.0)')
+    parser.add_argument('--min-start-sec', type=float, default=0.15,
+                        help='Minimum buffered seconds before playback starts (default: 0.15)')
     parser.add_argument('--device', type=int, default=None,
                         help='Audio output device index (interactive menu if omitted)')
     args = parser.parse_args()
