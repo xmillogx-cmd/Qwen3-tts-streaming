@@ -223,7 +223,7 @@ class StreamingAudioPlayer:
 class FastTTSv14:
     """Fast streaming TTS with true producer-consumer pipeline."""
 
-    def __init__(self, model_path, device='cuda:0', speaker='Sohee'):
+    def __init__(self, model_path, device='cuda:0', speaker='Sohee', device_id=None):
         self.device = device
         self.speaker = speaker
         print(f"[V14] Loading Qwen3TTSModel from {model_path}...", flush=True)
@@ -267,7 +267,7 @@ class FastTTSv14:
         print(f"[V14] Warmup: {warmup_ms:.0f}ms | Ready!", flush=True)
 
         # fixed: create player once and reuse across generate_and_play calls
-        self.player = StreamingAudioPlayer(sample_rate=24000, preroll_sec=0.3)
+        self.player = StreamingAudioPlayer(sample_rate=24000, device_id=device_id, preroll_sec=0.3)
         self.player.start()
 
     def _get_max_new_tokens(self, text):
@@ -428,14 +428,35 @@ def main():
     parser.add_argument('--text', nargs='*', help='Text to synthesize (or use default)')
     parser.add_argument('--chunk-size', type=int, default=8, choices=[2, 4, 8],
                         help='Audio chunk size in tokens (default: 8)')
-    parser.add_argument('--min-start-sec', type=float, default=0.15,
-                        help='Minimum buffered seconds before playback starts (default: 0.15)')
+    parser.add_argument('--min-start-sec', type=float, default=1.0,
+                        help='Minimum buffered seconds before playback starts (default: 1.0)')
+    parser.add_argument('--device', type=int, default=None,
+                        help='Audio output device index (interactive menu if omitted)')
     args = parser.parse_args()
 
     if not os.path.exists(args.model):
         print(f"Error: model path not found: {args.model}", flush=True)
         print("Hint: specify --model <path> or set MODEL_PATH env var", flush=True)
         sys.exit(1)
+
+    # Audio device selection menu
+    devices = sd.query_devices()
+    print("\nAudio devices:", flush=True)
+    for i, d in enumerate(devices):
+        name = d['name'][:50]
+        inp  = f"in={int(d['max_input_channels'])}" if d['max_input_channels'] else ''
+        out  = f"out={int(d['max_output_channels'])}" if d['max_output_channels'] else ''
+        flags = ', '.join(filter(None, [inp, out])) or '(no channels)'
+        default_mark = ' <-- default' if i == sd.default.device[1] else ''
+        print(f"  [{i:2d}] {name}  {flags}{default_mark}", flush=True)
+
+    device_id = args.device
+    if device_id is None:
+        try:
+            device_id = int(input("\nSelect audio device [Enter=default]: "))
+        except (ValueError, EOFError):
+            device_id = sd.default.device[1] or 0
+    print(f"  -> Using device {device_id}: {devices[device_id]['name'][:50]}", flush=True)
 
     text = ' '.join(args.text) if args.text else (
         "Привет! Это тест потоковой генерации. Звук должен быть плавным без щелчков!"
@@ -445,7 +466,7 @@ def main():
     print(f"PyTorch: {torch.__version__}", flush=True)
     print()
 
-    tts = FastTTSv14(args.model, speaker=args.speaker)
+    tts = FastTTSv14(args.model, speaker=args.speaker, device_id=device_id)
     try:
         tts.generate_and_play(text, save_wav='tts_output_v14.wav',
                               chunk_size=args.chunk_size, min_start_sec=args.min_start_sec)
