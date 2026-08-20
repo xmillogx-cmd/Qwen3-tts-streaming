@@ -47,6 +47,9 @@ Thumbs.db
 # Reference repos (not part of the project)
 faster-qwen3-tts/
 
+# Local launchers (personal, not part of the repo)
+.local/
+
 # Large binary assets
 *.pdf
 *.npz

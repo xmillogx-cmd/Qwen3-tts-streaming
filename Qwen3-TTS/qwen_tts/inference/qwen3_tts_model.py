@@ -15,6 +15,7 @@
 # limitations under the License.
 import base64
 import io
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -867,7 +868,8 @@ class Qwen3TTSModel:
         talker_hidden = talker_config.hidden_size
 
         device = str(self.device).split(":")[0] if isinstance(self.device, torch.device) else str(self.device)
-        dtype = self.generate_defaults.get("dtype", torch.bfloat16) if hasattr(self, "generate_defaults") else torch.bfloat16
+        # Use the model's actual parameter dtype (the config lookup never had a "dtype" key)
+        dtype = next(talker.parameters()).dtype
 
         self._predictor_graph = PredictorGraph(
             predictor, pred_config, talker_hidden,
@@ -1146,6 +1148,26 @@ class Qwen3TTSModel:
 
         return talker_input_embeds, talker_attention_mask, trailing_text_hiddens, tts_pad_embed
 
+    def _get_suppress_mask(self, eos_id: int, vocab_size: int, device):
+        """Boolean mask suppressing the top-1024 codec ids (except EOS).
+
+        Built once per (device, vocab, eos) and cached — previously rebuilt on every
+        generation call via ~1024 individual GPU element writes.
+        """
+        key = (str(device), int(vocab_size), int(eos_id))
+        cache = getattr(self, "_suppress_mask_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        start = max(0, vocab_size - 1024)
+        if start < vocab_size:
+            idx = torch.arange(start, vocab_size, device=device)
+            mask[idx] = True
+            if start <= eos_id < vocab_size:
+                mask[eos_id] = False
+        self._suppress_mask_cache = (key, mask)
+        return mask
+
     @torch.inference_mode()
     def _fast_generate_streaming(
         self,
@@ -1162,18 +1184,12 @@ class Qwen3TTSModel:
         chunk_size: int = 12,
     ):
         """Streaming generation using CUDA graphs (predictor + talker)."""
-        from .predictor_graph import PredictorGraph
         from .sampling import apply_repetition_penalty, sample_logits
 
         eos_id = config.codec_eos_token_id
-        vocab_size = config.vocab_size
         device = tie.device
 
-        suppress_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
-        suppress_start = max(0, vocab_size - 1024)
-        for i in range(suppress_start, vocab_size):
-            if i != eos_id:
-                suppress_mask[i] = True
+        suppress_mask = self._get_suppress_mask(eos_id, config.vocab_size, device)
 
         predictor = talker.code_predictor
         talker_codec_embed = talker.get_input_embeddings()
@@ -1181,7 +1197,7 @@ class Qwen3TTSModel:
         predictor_codec_embeds = predictor.get_input_embeddings()
         num_code_groups = config.num_code_groups
 
-        t_start = __import__("time").time()
+        t_start = time.time()
 
         out = talker.forward(
             inputs_embeds=tie,
@@ -1213,17 +1229,27 @@ class Qwen3TTSModel:
         self._talker_graph.set_generation_state(tam, rope_deltas)
 
         torch.cuda.synchronize()
-        t_prefill = __import__("time").time() - t_start
+        t_prefill = time.time() - t_start
 
         chunk_buffer = []
-        all_first_tokens = []
+        # Unique-first-token buffer for the repetition penalty: O(1) per step instead of
+        # re-stacking the whole history every step (O(T^2) allocations/copies).
+        uniq_buf = torch.empty(max_new_tokens, dtype=torch.long, device=device)
+        n_uniq = 0
+        seen_set = set()
         total_steps = 0
         chunk_count = 0
-        chunk_start = __import__("time").time()
+        chunk_start = time.time()
 
         for step_idx in range(max_new_tokens):
-            if token.item() == eos_id:
+            tok_val = token.item()
+            if tok_val == eos_id:
                 break
+            n_emitted = step_idx + 1
+            if tok_val not in seen_set:
+                seen_set.add(tok_val)
+                uniq_buf[n_uniq] = tok_val
+                n_uniq += 1
 
             last_id_hidden = talker_codec_embed(token.unsqueeze(1))
             pred_input = torch.cat((past_hidden, last_id_hidden), dim=1)
@@ -1231,7 +1257,6 @@ class Qwen3TTSModel:
 
             all_cb = torch.cat([token.view(1), codebook_token_ids])
             chunk_buffer.append(all_cb.detach())
-            all_first_tokens.append(token.detach())
 
             codec_hiddens = [last_id_hidden]
             for i in range(num_code_groups - 1):
@@ -1250,11 +1275,11 @@ class Qwen3TTSModel:
             hidden_states = self._talker_graph.run(inputs_embeds, position=current_pos)
             logits = talker_codec_head(hidden_states[:, -1, :]).unsqueeze(0)
 
-            if repetition_penalty != 1.0 and all_first_tokens:
-                history = torch.stack(all_first_tokens)
-                logits = apply_repetition_penalty(logits, history, repetition_penalty)
+            if repetition_penalty != 1.0 and n_uniq > 0:
+                # uniq_buf[:n_uniq] holds each distinct first token exactly once
+                logits = apply_repetition_penalty(logits, uniq_buf[:n_uniq], repetition_penalty)
 
-            suppress_eos = len(all_first_tokens) < min_new_tokens
+            suppress_eos = n_emitted < min_new_tokens
             token = sample_logits(
                 logits.squeeze(0), temperature=temperature, top_k=top_k, top_p=top_p,
                 do_sample=do_sample, suppress_mask=suppress_mask,
@@ -1265,7 +1290,7 @@ class Qwen3TTSModel:
 
             if len(chunk_buffer) >= chunk_size:
                 torch.cuda.synchronize()
-                chunk_decode_time = __import__("time").time() - chunk_start
+                chunk_decode_time = time.time() - chunk_start
                 total_steps += len(chunk_buffer)
 
                 yield torch.stack(chunk_buffer), {
@@ -1279,15 +1304,12 @@ class Qwen3TTSModel:
 
                 chunk_buffer = []
                 chunk_count += 1
-                chunk_start = __import__("time").time()
-
-                # Check EOS after yielding chunk (fix: was missing!)
-                if token.item() == eos_id:
-                    break
+                chunk_start = time.time()
+                # EOS termination is caught at the top of the loop, before any work.
 
         if chunk_buffer:
             torch.cuda.synchronize()
-            chunk_decode_time = __import__("time").time() - chunk_start
+            chunk_decode_time = time.time() - chunk_start
             total_steps += len(chunk_buffer)
 
             yield torch.stack(chunk_buffer), {
@@ -1318,16 +1340,11 @@ class Qwen3TTSModel:
         from .sampling import apply_repetition_penalty, sample_logits
 
         eos_id = config.codec_eos_token_id
-        vocab_size = config.vocab_size
         device = tie.device
 
-        suppress_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
-        suppress_start = max(0, vocab_size - 1024)
-        for i in range(suppress_start, vocab_size):
-            if i != eos_id:
-                suppress_mask[i] = True
+        suppress_mask = self._get_suppress_mask(eos_id, config.vocab_size, device)
 
-        t_start = __import__("time").time()
+        t_start = time.time()
 
         out = talker.forward(
             inputs_embeds=tie,
@@ -1358,17 +1375,26 @@ class Qwen3TTSModel:
             tam = tam.clone()
 
         torch.cuda.synchronize()
-        t_prefill = __import__("time").time() - t_start
+        t_prefill = time.time() - t_start
 
         chunk_buffer = []
-        all_first_tokens = []
+        # Unique-first-token buffer for the repetition penalty (O(1) per step).
+        uniq_buf = torch.empty(max_new_tokens, dtype=torch.long, device=device)
+        n_uniq = 0
+        seen_set = set()
         total_steps = 0
         chunk_count = 0
-        chunk_start = __import__("time").time()
+        chunk_start = time.time()
 
-        for _ in range(max_new_tokens):
-            if token.item() == eos_id:
+        for step_idx in range(max_new_tokens):
+            tok_val = token.item()
+            if tok_val == eos_id:
                 break
+            n_emitted = step_idx + 1
+            if tok_val not in seen_set:
+                seen_set.add(tok_val)
+                uniq_buf[n_uniq] = tok_val
+                n_uniq += 1
 
             cache_position = None
             if tam is not None:
@@ -1396,14 +1422,13 @@ class Qwen3TTSModel:
                 break
 
             chunk_buffer.append(codec_ids.squeeze(0).detach())
-            all_first_tokens.append(token.detach())
 
             logits = out.logits[:, -1, :]
-            if repetition_penalty != 1.0 and all_first_tokens:
-                history = torch.stack(all_first_tokens)
-                logits = apply_repetition_penalty(logits, history, repetition_penalty)
+            if repetition_penalty != 1.0 and n_uniq > 0:
+                # uniq_buf[:n_uniq] holds each distinct first token exactly once
+                logits = apply_repetition_penalty(logits, uniq_buf[:n_uniq], repetition_penalty)
 
-            suppress_eos = len(all_first_tokens) < min_new_tokens
+            suppress_eos = n_emitted < min_new_tokens
             token = sample_logits(
                 logits, temperature=temperature, top_k=top_k, top_p=top_p,
                 do_sample=do_sample, suppress_mask=suppress_mask,
@@ -1416,7 +1441,7 @@ class Qwen3TTSModel:
 
             if len(chunk_buffer) >= chunk_size:
                 torch.cuda.synchronize()
-                chunk_decode_time = __import__("time").time() - chunk_start
+                chunk_decode_time = time.time() - chunk_start
                 total_steps += len(chunk_buffer)
 
                 yield torch.stack(chunk_buffer), {
@@ -1430,15 +1455,12 @@ class Qwen3TTSModel:
 
                 chunk_buffer = []
                 chunk_count += 1
-                chunk_start = __import__("time").time()
-
-                # Check EOS after yielding chunk (fix: was missing!)
-                if token.item() == eos_id:
-                    break
+                chunk_start = time.time()
+                # EOS termination is caught at the top of the loop, before any work.
 
         if chunk_buffer:
             torch.cuda.synchronize()
-            chunk_decode_time = __import__("time").time() - chunk_start
+            chunk_decode_time = time.time() - chunk_start
             total_steps += len(chunk_buffer)
 
             yield torch.stack(chunk_buffer), {

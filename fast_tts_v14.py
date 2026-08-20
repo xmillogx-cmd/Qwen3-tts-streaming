@@ -4,7 +4,7 @@ Fast TTS v14 — True Streaming Playback
 - CUDA graph warmup done ONCE during model loading
 - TRUE streaming: producer thread -> queue -> player (no two-phase collection)
 - Text segmentation for long inputs (split_segments)
-- Global RMS normalization for consistent loudness across chunks
+- Peak-normalized WAV output (live playback uses raw model output)
 - Live speaker output via sounddevice
 """
 from __future__ import annotations
@@ -34,8 +34,8 @@ def to_pcm_chunk(x) -> np.ndarray:
     return np.asarray(x, dtype=np.float32).reshape(-1)
 
 
-def global_normalize(audio_chunks: List[np.ndarray], limit: float = 0.95) -> List[np.ndarray]:
-    """Normalize all chunks together by global peak to avoid loudness pumping."""
+def global_peak_normalize(audio_chunks: List[np.ndarray], limit: float = 0.95) -> List[np.ndarray]:
+    """Peak-normalize the concatenated audio (applied to saved WAV only)."""
     if not audio_chunks:
         return audio_chunks
     full = np.concatenate(audio_chunks)
@@ -82,8 +82,8 @@ def split_segments(text: str, max_chars: int = 85) -> List[str]:
                 for w in words:
                     if not cur:
                         cur = w
-                    elif len(cur) + 1 + 1 + len(w) <= max_chars:
-                        cur = f"{cur} {w}"  # fixed: was missing space
+                    elif len(cur) + 1 + len(w) <= max_chars:
+                        cur = f"{cur} {w}"  # one space between words
                     else:
                         segments.append(cur)
                         cur = w
@@ -96,7 +96,9 @@ def split_segments(text: str, max_chars: int = 85) -> List[str]:
 # STREAMING AUDIO PLAYER (callback-based)
 # ============================================================================
 class StreamingAudioPlayer:
-    def __init__(self, sample_rate: int = 24000, device_id: Optional[int] = None, blocksize: int = 1024, preroll_sec: float = 0.3) -> None:
+    # blocksize 4800 (~200ms @24kHz) instead of 1024: fewer PortAudio callbacks
+    # means less GIL/DPC contention with the generation thread on USB audio devices.
+    def __init__(self, sample_rate: int = 24000, device_id: Optional[int] = None, blocksize: int = 4800, preroll_sec: float = 0.3) -> None:
         self.sample_rate = sample_rate
         if device_id is None:
             devices = sd.query_devices()
@@ -253,35 +255,33 @@ class FastTTSv14:
         load_ms = (time.perf_counter() - t0) * 1000
         print(f"[V14] Load: {load_ms:.0f}ms", flush=True)
 
-        # Preflight warmup - capture CUDA graphs for ALL chunk_size variants
-        # This prevents TTFA spikes on first real request
-        print("[V14] Preflight warmup (all chunk sizes)...", flush=True)
+        # Preflight warmup — capture CUDA graphs and reach steady state.
+        # Graphs are shape-based, not content-based: the talker graph has a position/
+        # attention-mask table for every position up to 2048 (any prefill length works),
+        # and the predictor graph is fixed-size (batch=1, seq=1). Neither language nor
+        # chunk_size changes what gets captured — so a few short calls suffice.
+        # (Was: 6 languages x 3 chunk sizes = 18 calls, ~30s of pure startup waste.)
+        print("[V14] Preflight warmup...", flush=True)
         t0 = time.perf_counter()
 
-        # Warmup texts covering all supported languages — ensures CUDA graphs
-        # and language-specific embedding paths are captured before first real call.
         warmup_texts = {
-            'Russian':   "Привет! Как дела? Я живу в Москве. Это тест потоковой генерации речи.",
-            'English':   "Hello! How are you doing today? This is a test of streaming speech generation.",
-            'German':    "Hallo! Wie geht es dir? Ich wohne in Berlin und arbeite als Softwareentwickler.",
-            'Spanish':   "Hola! ¿Cómo estás? Vivo en Madrid y trabajo como ingeniero de software.",
-            'French':    "Bonjour! Comment allez-vous? Je vis à Paris et je travaille comme développeur.",
-            'Chinese':   "你好！我叫李明。我住在北京，是一名软件工程师。",
+            'Russian':   "Привет! Как дела? Это тест потоковой генерации речи.",
+            'English':   "Hello! How are you doing today?",
+            'Chinese':   "你好！我叫李明。",
         }
 
         for lang, text in warmup_texts.items():
-            for chunk_size in [2, 4, 8]:
-                gen = self.model.generate_custom_voice_streaming(
-                    text=text,
-                    speaker=self.speaker,
-                    language=lang,
-                    chunk_size=chunk_size,
-                    max_new_tokens=50,
-                    backend='auto',
-                )
-                for _ in gen:
-                    pass
-                gen.close()
+            gen = self.model.generate_custom_voice_streaming(
+                text=text,
+                speaker=self.speaker,
+                language=lang,
+                chunk_size=8,
+                max_new_tokens=50,
+                backend='auto',
+            )
+            for _ in gen:
+                pass
+            gen.close()
 
         torch.cuda.synchronize()
         warmup_ms = (time.perf_counter() - t0) * 1000
@@ -296,8 +296,11 @@ class FastTTSv14:
         atexit.register(self.player.stop)
 
     def _get_max_new_tokens(self, text: str) -> int:
+        # Caps are a safety net against runaway generation — normal speech ends at EOS.
+        # profile_v14 section E measured a 1-word segment needing up to 39 codec steps,
+        # so the old cap of 20 truncated short segments mid-speech.
         word_count = len(re.findall(r'\b\w+\b', text))
-        if word_count <= 2: return 20
+        if word_count <= 2: return 64
         elif word_count <= 5: return 50
         elif word_count <= 10: return 100
         else: return 160
@@ -419,8 +422,10 @@ class FastTTSv14:
         if errors:
             raise errors[0]
 
-        # Global RMS normalization (avoids loudness pumping between chunks)
-        all_wavs = global_normalize(all_wavs)
+        # Peak-normalize for the saved WAV only. Live playback already used raw chunks
+        # (streamed audio cannot be rescaled retroactively), so the file may differ from
+        # what was heard by a constant gain — expected, not a bug.
+        all_wavs = global_peak_normalize(all_wavs)
 
         total_ms = (time.perf_counter() - t_start) * 1000
         ttfa_ms = first_chunk_time[0] * 1000 if first_chunk_time[0] else 0

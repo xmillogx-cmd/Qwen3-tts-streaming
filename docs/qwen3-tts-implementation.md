@@ -38,11 +38,12 @@ We implemented streaming speech generation based on **Qwen3-TTS-0.6B** with **CU
 
 | File | Description |
 |------|-------------|
-| `fast_tts_v14.py` | Final implementation — streaming with crossfade |
-| `fast_tts_v10.py` | CUDA Graphs + streaming pipeline (transitional version) |
-| `streaming_tts_v6.py` | First working producer-consumer pipeline |
-| `qwen_tts_cuda_graphs/` | Custom PredictorGraph and TalkerGraph |
+| `fast_tts_v14.py` | Final implementation — true streaming via native `generate_custom_voice_streaming`, seamless chunk concatenation |
+| `profile_v14.py` | Baseline profiler: load/capture cost, Mimi decode vs context, TTFA/RTF, token-cap usage |
+| `Qwen3-TTS/qwen_tts/inference/` | Custom PredictorGraph and TalkerGraph (patched in-repo) |
 | `docs/cuda_graphs_optimization.md` | Detailed CUDA Graphs optimization breakdown |
+
+> Note: earlier iterations (`streaming_tts_v6/v7/v8.py`, `fast_tts_final.py`, `fast_tts_v10.py`) no longer exist in this repository — v14 is the only maintained implementation (their history lives on in git log / version notes below).
 
 ---
 
@@ -246,7 +247,7 @@ static_cache[:, :, step, :] = new_key_value  # just a write!
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│              qwen_tts_cuda_graphs/                    │
+│       Qwen3-TTS/qwen_tts/inference/ (patched)         │
 │                                                       │
 │  ┌─────────────────────────────────────────────────┐  │
 │  │           PredictorGraph                        │  │
@@ -273,7 +274,7 @@ static_cache[:, :, step, :] = new_key_value  # just a write!
 
 ### PredictorGraph — capturing the predictor graph
 
-File: `qwen_tts_cuda_graphs/predictor_graph.py`
+File: `Qwen3-TTS/qwen_tts/inference/predictor_graph.py`
 
 ```python
 class PredictorGraph:
@@ -304,7 +305,7 @@ class PredictorGraph:
 
 ### TalkerGraph — capturing the decoder
 
-File: `qwen_tts_cuda_graphs/talker_graph.py`
+File: `Qwen3-TTS/qwen_tts/inference/talker_graph.py`
 
 ```python
 class TalkerGraph:
@@ -858,13 +859,11 @@ player.add_chunk(chunk)
 | File | Description |
 |------|-------------|
 | `fast_tts_v14.py` | Final streaming implementation |
-| `fast_tts_v10.py` | CUDA Graphs + streaming pipeline |
-| `streaming_tts_v6.py` | First working producer-consumer |
-| `qwen_tts_cuda_graphs/predictor_graph.py` | Predictor CUDA graph |
-| `qwen_tts_cuda_graphs/talker_graph.py` | Talker CUDA graph |
+| `profile_v14.py` | Baseline profiler (load/capture, Mimi vs ctx, TTFA/RTF, token caps) |
+| `Qwen3-TTS/qwen_tts/inference/predictor_graph.py` | Predictor CUDA graph |
+| `Qwen3-TTS/qwen_tts/inference/talker_graph.py` | Talker CUDA graph |
 | `docs/cuda_graphs_optimization.md` | Detailed optimization breakdown |
-| `bench_faster_custom_voice.py` | Benchmark script |
-| `bench_comparison.json` | Benchmark results |
+| `bench_sdpa.py` | SDPA attention benchmark |
 
 ### B. Useful commands
 

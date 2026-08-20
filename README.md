@@ -9,7 +9,8 @@ A streaming speech synthesis engine built on **Qwen3-TTS-0.6B** with **CUDA Grap
 | Component | Description |
 |-----------|-------------|
 | `fast_tts_v14.py` | Final implementation — true streaming via native `generate_custom_voice_streaming`, seamless chunk concatenation |
-| `qwen_tts_cuda_graphs/` | Custom `PredictorGraph` and `TalkerGraph` — ported from [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) with adaptation for native `qwen_tts` |
+| `Qwen3-TTS/qwen_tts/inference/` | CUDA Graph code (`PredictorGraph`, `TalkerGraph`) — ported from [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts), patched in-repo (live editable install) |
+| `profile_v14.py` | Baseline profiler: load/capture cost, Mimi decode vs context, TTFA/RTF, token-cap usage |
 | `run_native.py` | Quick test of native Qwen3TTSModel streaming API |
 | `run_faster.py` | Quick test of FasterQwen3TTS (CUDA graphs) streaming API |
 | `bench_sdpa.py` | SDPA attention performance benchmark |
@@ -42,14 +43,15 @@ A streaming speech synthesis engine built on **Qwen3-TTS-0.6B** with **CUDA Grap
 
 ### Installation
 
-#### Clone (with submodules)
+#### Clone
 
 ```bash
-git clone --recursive https://github.com/xmillogx-cmd/Qwen3-tts-streaming.git
+git clone https://github.com/xmillogx-cmd/Qwen3-tts-streaming.git
 cd Qwen3-tts-streaming
-# Or if already cloned without --recursive:
-git submodule update --init --recursive
 ```
+
+No submodules — the patched `Qwen3-TTS/` source is vendored directly in the repo.
+(`faster-qwen3-tts/`, if present, is a gitignored reference-only clone used by `run_faster.py`; not required for anything else.)
 
 #### Dependencies
 
@@ -109,18 +111,15 @@ qwen-tts-streaming/
 ├── bench_sdpa.py               # SDPA attention benchmark
 ├── debug_graphs.py             # CUDA graph timing diagnostics
 ├── test_v14.py                 # Full test suite — 10 sentences + playback
+├── profile_v14.py              # Baseline profiler: load/capture, Mimi vs ctx, TTFA/RTF, token caps
 ├── requirements.txt            # Python dependencies
 ├── *.bat                       # Windows launchers (double-click friendly)
-├── qwen_tts_cuda_graphs/       # CUDA Graph optimizations
-│   ├── __init__.py
-│   ├── predictor_graph.py      # 15-step predictor loop capture
-│   ├── talker_graph.py         # Single-token talker decode capture
-│   └── sampling.py             # Token sampling utilities
 ├── docs/
 │   ├── cuda_graphs_optimization.md  # Detailed CUDA Graphs breakdown
 │   └── qwen3-tts-implementation.md  # Architecture and version history
-├── Qwen3-TTS/                  # submodule — original Qwen3-TTS
-└── faster-qwen3-tts/           # submodule — source of CUDA Graphs
+├── Qwen3-TTS/                  # Vendored + patched qwen_tts source (live editable install)
+│   └── qwen_tts/inference/     # CUDA Graph code: predictor_graph.py, talker_graph.py, sampling.py
+└── faster-qwen3-tts/           # Gitignored reference-only clone (source of the CUDA Graphs port)
 ```
 
 ### Generation architecture (v14)
@@ -161,7 +160,8 @@ Text → split_segments() → generate_custom_voice_streaming() × N segments
 | Компонент | Описание |
 |-----------|----------|
 | `fast_tts_v14.py` | Финальная реализация — true streaming через нативный `generate_custom_voice_streaming`, бесшовная склейка чанков |
-| `qwen_tts_cuda_graphs/` | Кастомные `PredictorGraph` и `TalkerGraph` — перенесены из [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) с адаптацией под нативный `qwen_tts` |
+| `Qwen3-TTS/qwen_tts/inference/` | Код CUDA Graph (`PredictorGraph`, `TalkerGraph`) — перенесён из [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts), патчится прямо в репозитории (live editable install) |
+| `profile_v14.py` | Базовый профайлер: стоимость load/capture, Mimi decode vs контекст, TTFA/RTF, расход токенов |
 | `run_native.py` | Быстрый тест нативного API Qwen3TTSModel |
 | `run_faster.py` | Быстрый тест FasterQwen3TTS (CUDA graphs) |
 | `bench_sdpa.py` | Бенчмарк SDPA attention |
@@ -194,14 +194,15 @@ Text → split_segments() → generate_custom_voice_streaming() × N segments
 
 ### Установка
 
-#### Клонирование (с подмодулями)
+#### Клонирование
 
 ```bash
-git clone --recursive https://github.com/xmillogx-cmd/Qwen3-tts-streaming.git
+git clone https://github.com/xmillogx-cmd/Qwen3-tts-streaming.git
 cd Qwen3-tts-streaming
-# Или если уже склонирован без --recursive:
-git submodule update --init --recursive
 ```
+
+Подмодулей нет — патченный исходник `Qwen3-TTS/` закоммичен прямо в репозиторий.
+(`faster-qwen3-tts/`, если присутствует, — gitignored-клон только для референса, используется `run_faster.py`; без него всё остальное работает.)
 
 #### Зависимости
 
@@ -261,18 +262,15 @@ qwen-tts-streaming/
 ├── bench_sdpa.py               # Бенчмарк SDPA attention
 ├── debug_graphs.py             # Дебаг таймингов CUDA graph
 ├── test_v14.py                 # Полный тест — 10 предложений + проигрывание
+├── profile_v14.py              # Базовый профайлер: load/capture, Mimi vs ctx, TTFA/RTF, лимиты токенов
 ├── requirements.txt            # Python зависимости
 ├── *.bat                       # Windows-лаунчеры (двойной клик)
-├── qwen_tts_cuda_graphs/       # CUDA Graph оптимизации
-│   ├── __init__.py
-│   ├── predictor_graph.py      # 15-step predictor loop capture
-│   ├── talker_graph.py         # Single-token talker decode capture
-│   └── sampling.py             # Token sampling utilities
 ├── docs/
 │   ├── cuda_graphs_optimization.md  # Детальный разбор CUDA Graphs
 │   └── qwen3-tts-implementation.md  # Архитектура и эволюция версий
-├── Qwen3-TTS/                  # submodule — оригинальный Qwen3-TTS
-└── faster-qwen3-tts/           # submodule — источник CUDA Graphs
+├── Qwen3-TTS/                  # Вендорный + патченный исходник qwen_tts (live editable install)
+│   └── qwen_tts/inference/     # Код CUDA Graph: predictor_graph.py, talker_graph.py, sampling.py
+└── faster-qwen3-tts/           # Gitignored-клон только для референса (источник переноса CUDA Graphs)
 ```
 
 ### Архитектура генерации (v14)

@@ -1,10 +1,36 @@
 """Test v14 — Streaming playback with proper warmup."""
 import argparse, os, torch, time, numpy as np, soundfile as sf, sounddevice as sd, sys, threading, queue
 
+# ------------------------------------------------------------------ run log
+# Mirror stdout/stderr to .local/logs/test_v14_<ts>.log (gitignored),
+# so every run leaves a readable history even if the console window closes.
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".local", "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_PATH = os.path.join(_LOG_DIR, f"test_v14_{time.strftime('%Y%m%d_%H%M%S')}.log")
+_log_file = open(_LOG_PATH, "w", encoding="utf-8")
+
+class _Tee:
+    def __init__(self, stream):
+        self.stream = stream
+    def write(self, s):
+        self.stream.write(s)
+        _log_file.write(s)
+        if "\n" in s:
+            self.stream.flush()
+    def flush(self):
+        self.stream.flush()
+        _log_file.flush()
+
+sys.stdout = _Tee(sys.stdout)
+sys.stderr = _Tee(sys.stderr)
+print(f"[LOG] saving run log to {_LOG_PATH}", flush=True)
+
 parser = argparse.ArgumentParser(description='TTS v14 streaming test suite')
 parser.add_argument('--model', default=os.getenv('MODEL_PATH', r'G:\Foundation\models\Qwen3-TTS'),
                     help='Path to Qwen3-TTS model directory')
 parser.add_argument('--speaker', default='Sohee')
+parser.add_argument('--no-play', action='store_true',
+                    help='Skip audio playback — pure pipeline timing (diagnostic)')
 args = parser.parse_args()
 
 model_path = args.model
@@ -68,7 +94,9 @@ print()
 # STREAMING AUDIO PLAYER
 # ============================================================================
 class StreamingAudioPlayer:
-    def __init__(self, sample_rate=24000, device_id=None, blocksize=1024, preroll_sec=0.3):
+    # blocksize 4800 (~200ms @24kHz) instead of 1024: fewer PortAudio callbacks
+    # means less GIL/DPC contention with the generation thread on USB audio devices.
+    def __init__(self, sample_rate=24000, device_id=None, blocksize=4800, preroll_sec=0.3):
         self.sample_rate = sample_rate
         if device_id is None:
             devices = sd.query_devices()
@@ -197,8 +225,12 @@ class StreamingAudioPlayer:
 # ============================================================================
 # RUN TESTS WITH STREAMING PLAYBACK
 # ============================================================================
-player = StreamingAudioPlayer(sample_rate=24000, preroll_sec=0.3)
-player.start()
+if args.no_play:
+    player = None
+    print("[no-play] audio device disabled — pure pipeline timing", flush=True)
+else:
+    player = StreamingAudioPlayer(sample_rate=24000, preroll_sec=0.3)
+    player.start()
 
 results = []
 for i, text in enumerate(sentences):
@@ -255,7 +287,10 @@ for i, text in enumerate(sentences):
         
         if chunk.size == 0:
             continue
-        
+
+        if player is None:
+            continue  # --no-play: just drain the queue (timing only)
+
         # Backpressure
         while player.buffered_seconds() > max_buffer_sec and not player.is_finished():
             time.sleep(0.01)
@@ -293,8 +328,9 @@ for i, text in enumerate(sentences):
     print(f"      Text: {text}")
 
 # Signal end only after all sentences
-player.add_chunk(None)
-player.stop()
+if player is not None:
+    player.add_chunk(None)
+    player.stop()
 
 # Summary
 print()
