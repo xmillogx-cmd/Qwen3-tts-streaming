@@ -40,3 +40,21 @@ fast-tts = "fast_tts.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["fast_tts"]
+
+# sdist must contain only what is needed to build the package — never the
+# vendored Apache-2.0 Qwen3-TTS source, internal docs, or dev scripts.
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "QWEN.md",
+    "requirements.txt",
+    "fast_tts_v14.py",
+    "*.bat",
+    "bench_sdpa.py",
+    "debug_graphs.py",
+    "profile_v14.py",
+    "run_faster.py",
+    "run_native.py",
+    "test_v14.py",
+    "docs/**",
+    "Qwen3-TTS/**",
+]
