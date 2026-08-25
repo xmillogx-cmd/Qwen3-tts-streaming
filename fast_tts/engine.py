@@ -180,7 +180,8 @@ class FastTTSv14:
             print(f"  [{i+1}] {s}", flush=True)
 
         if not segments:
-            return [np.zeros(0, dtype=np.float32)], 24000, {}
+            print("[V14] No text to generate.", flush=True)
+            return
 
         # fixed: reuse self.player instead of creating new one each call
         self.player.reset()

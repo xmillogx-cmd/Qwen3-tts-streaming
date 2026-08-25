@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from typing import Optional
 
 import numpy as np
@@ -93,13 +92,8 @@ class StreamingAudioPlayer:
         # fixed: update _buffered under lock BEFORE put to avoid race condition
         with self._lock:
             self._buffered += chunk.size
-        # fixed: blocking put with retry instead of dropping chunks on Full
-        while True:
-            try:
-                self._chunks.put_nowait(np.ascontiguousarray(chunk))
-                break
-            except queue.Full:
-                time.sleep(0.005)
+        # fixed: blocking put — waits for the consumer instead of polling; never drops chunks
+        self._chunks.put(np.ascontiguousarray(chunk))
 
     def buffered_seconds(self) -> float:
         with self._lock:
