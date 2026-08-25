@@ -1,5 +1,7 @@
 # Qwen3-TTS Streaming Engine (`fast_tts`)
 
+[![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-blue?logo=github)](https://github.com/xmillogx-cmd/Qwen3-tts-streaming)
+
 True-streaming speech synthesis for **Qwen3-TTS-0.6B**, with **CUDA Graphs** acceleration for real-time playback. Installable as a PyPI package: `pip install qwen3-tts-streaming`.
 
 ## What's inside

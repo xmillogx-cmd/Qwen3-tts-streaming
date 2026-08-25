@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qwen3-tts-streaming"
-version = "0.1.0"
+version = "0.1.1"
 description = "True streaming Qwen3-TTS with CUDA Graphs acceleration (RTF 2.67, TTFA ~355 ms)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,12 @@ dependencies = [
     "sounddevice",
     "numpy",
 ]
+
+[project.urls]
+Homepage = "https://github.com/xmillogx-cmd/Qwen3-tts-streaming"
+Repository = "https://github.com/xmillogx-cmd/Qwen3-tts-streaming"
+"Bug Tracker" = "https://github.com/xmillogx-cmd/Qwen3-tts-streaming/issues"
+Documentation = "https://github.com/xmillogx-cmd/Qwen3-tts-streaming/tree/master/docs"
 
 [project.scripts]
 fast-tts = "fast_tts.cli:main"
