@@ -1,6 +1,6 @@
 # Qwen3-TTS Streaming Engine (`fast_tts`)
 
-The reference streaming speech synthesis engine for **Qwen3-TTS-0.6B**, with **CUDA Graphs** acceleration for real-time playback. Installable as a PyPI package: `pip install qwen3-tts-streaming`.
+True-streaming speech synthesis for **Qwen3-TTS-0.6B**, with **CUDA Graphs** acceleration for real-time playback. Installable as a PyPI package: `pip install qwen3-tts-streaming`.
 
 ## What's inside
 
@@ -9,7 +9,7 @@ The reference streaming speech synthesis engine for **Qwen3-TTS-0.6B**, with **C
 | `fast_tts/` | The pip-installable package — streaming engine, audio player, CLI, and the CUDA-graph patch for stock `qwen-tts` |
 | `fast_tts/engine.py` | `FastTTSv14` — true streaming via native `generate_custom_voice_streaming`, seamless chunk concatenation |
 | `fast_tts/player.py` | `StreamingAudioPlayer` — callback-based live playback (sounddevice) with backpressure |
-| `fast_tts/_patch/` | CUDA Graph acceleration (`PredictorGraph`, `TalkerGraph`) + streaming methods — this project's reference implementation, cross-checked against the independent [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts); attached to stock `Qwen3TTSModel` at import time |
+| `fast_tts/_patch/` | CUDA Graph acceleration (`PredictorGraph`, `TalkerGraph`) + streaming methods — our own implementation (provenance and attribution in the [License](#license) section); attached to stock `Qwen3TTSModel` at import time |
 | `profile_v14.py` | Baseline profiler: load/capture cost, Mimi decode vs context, TTFA/RTF, token-cap usage |
 | `run_native.py` / `run_faster.py` | Quick tests of the native and FasterQwen3TTS streaming APIs |
 | `bench_sdpa.py` | SDPA attention performance benchmark |
@@ -17,7 +17,7 @@ The reference streaming speech synthesis engine for **Qwen3-TTS-0.6B**, with **C
 | `test_v14.py` | Full test suite — 10 sentences with playback verification |
 | `*.bat` | Windows launchers (double-click or from terminal) |
 | `docs/` | Technical documentation on the optimizations |
-| `Qwen3-TTS/` | Vendored + patched `qwen_tts` source (source of truth for `_patch/`; live editable install in this dev repo) |
+| `Qwen3-TTS/` | Official [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) source (Apache-2.0) — development reference only, not shipped; the package itself works against plain `pip install qwen-tts` |
 
 ## Results on RTX 5060 Ti (CC 12.0)
 
@@ -122,7 +122,7 @@ qwen3-tts-streaming/
 │   ├── engine.py                 # FastTTSv14 — true streaming, seamless chunk concatenation
 │   ├── player.py                 # StreamingAudioPlayer — callback-based live playback
 │   ├── cli.py                    # `fast-tts` entry point + dev test suite
-│   └── _patch/                   # CUDA-graph modules + streaming methods (reference implementation)
+│   └── _patch/                   # CUDA-graph modules + streaming methods (our own implementation — see License section)
 ├── fast_tts_v14.py               # Backward-compat shim → re-exports from the package
 ├── run_native.py / run_faster.py # Quick API tests
 ├── bench_sdpa.py                 # SDPA attention benchmark
@@ -134,10 +134,10 @@ qwen3-tts-streaming/
 ├── docs/
 │   ├── cuda_graphs_optimization.md  # Detailed CUDA Graphs breakdown
 │   └── qwen3-tts-implementation.md  # Architecture and version history
-└── Qwen3-TTS/                    # Vendored + patched qwen_tts source (source of truth for _patch/)
+└── Qwen3-TTS/                    # Official Qwen3-TTS source — dev-time reference only, not shipped
 ```
 
 ## License
 
-- This package (`fast_tts`) — **MIT** (see `LICENSE`). The CUDA Graph and streaming modules in `_patch/` are this project's own reference implementation, cross-checked against the independent [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) project (**MIT**).
+- This package (`fast_tts`) — **MIT** (see `LICENSE`). Provenance of the `_patch/` modules: the CUDA-graph capture strategy follows the approach published in [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) (**MIT**, © andimarafioti); our implementation is written independently against that design. The talker input construction follows the official Qwen3-TTS algorithm (**Apache-2.0**), restructured with hoisted constants and per-sample helper dispatch.
 - Base model Qwen3-TTS and the `qwen-tts` dependency — **Apache 2.0**, [Alibaba Group / QwenLM](https://github.com/QwenLM/Qwen3-TTS).

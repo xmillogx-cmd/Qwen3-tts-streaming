@@ -1,17 +1,23 @@
-#!/usr/bin/env python3
-"""
-CUDA graph capture for the code predictor's 15-step decode loop,
-using transformers StaticCache.
+"""CUDA-graph capture for the Qwen3-TTS code predictor.
 
-The predictor generates 15 codebooks autoregressively:
-- Step 0: prefill with 2 tokens (past_hidden + first_codebook_embed), get logits[0]
-- Steps 1-14: decode 1 token at a time using previous codebook token's embedding
+The code predictor emits one token per codebook, autoregressively over all 15
+codebooks: a 2-token prefill (talker hidden state + first-codebook embedding)
+followed by 14 single-token decode steps, where each step embeds the token
+sampled from the previous codebook through that codebook's own embedding
+table.
 
-Strategy:
-- Use transformers StaticCache for KV cache management
-- Use the predictor's inner model forward (handles mask, RoPE, attention internally)
-- Unroll the full 15-step loop for deterministic shapes
-- Capture the entire loop as a single CUDA graph
+This module captures the entire 15-step pipeline as a single CUDA graph so a
+full codebook frame costs one ``graph.replay()`` instead of ~30 kernel
+launches. The capture strategy (fixed-shape StaticCache, unrolled loop)
+follows the approach published in faster-qwen3-tts (MIT); this is our own
+implementation with a precomputed per-step plan table and an optional shared
+graph memory pool.
+
+Usage::
+
+    pg = PredictorGraph(code_predictor, pred_config, talker_hidden_size)
+    pg.capture()
+    codes = pg.run(pred_input)   # pred_input: [1, 2, H_talker] -> [15] long
 """
 import torch
 from transformers import StaticCache
@@ -20,195 +26,191 @@ from transformers.masking_utils import create_causal_mask, create_sliding_window
 from .sampling import sample_logits
 
 
+def _device_index(device) -> int:
+    """Resolve a device string/tensor to a concrete CUDA index."""
+    idx = torch.device(device).index
+    return idx if idx is not None else torch.cuda.current_device()
+
+
 class PredictorGraph:
-    """
-    Captures the full predictor 15-step loop as a CUDA graph,
-    using the model's forward with transformers StaticCache.
+    """Captures the full 15-step predictor loop as one CUDA graph.
 
-    Usage:
-        mpg = PredictorGraph(code_predictor, pred_config, talker_hidden_size)
-        mpg.capture()
-        codebook_tokens = mpg.run(pred_input)  # pred_input: [1, 2, H]
+    Every tensor touched by the captured region is a static buffer allocated
+    in ``__init__``; replays only copy new inputs into them, so no
+    allocations or CPU->GPU transfers happen inside the graph.
     """
 
-    def __init__(self, code_predictor, pred_config, talker_hidden_size, device='cuda', dtype=torch.bfloat16,
-                 do_sample=True, top_k=50, top_p=1.0, temperature=0.9):
+    def __init__(self, code_predictor, pred_config, talker_hidden_size, device='cuda',
+                 dtype=torch.bfloat16, do_sample=True, top_k=50, top_p=1.0, temperature=0.9,
+                 pool=None):
         self.device = device
-        device_index = torch.device(device).index
-        device_index = device_index if device_index is not None else torch.cuda.current_device()
-        self.device_index = device_index
-
+        self._dev_idx = _device_index(device)
         self.dtype = dtype
-        self.num_layers = pred_config.num_hidden_layers
-        self.hidden_size = pred_config.hidden_size
-        self.num_code_groups = pred_config.num_code_groups
-        self.num_codebooks = self.num_code_groups - 1  # 15
-        self.max_seq = 2 + self.num_codebooks  # 17
-        self.do_sample = do_sample
-        self.top_k = top_k
-        self.top_p = top_p
-        self.temperature = temperature
 
-        # Extract model components (references, not copies)
+        cfg = pred_config
+        self.num_layers = cfg.num_hidden_layers
+        self.hidden_size = cfg.hidden_size
+        self.num_code_groups = cfg.num_code_groups
+        self.num_codebooks = self.num_code_groups - 1   # 15
+        self.max_seq = 2 + self.num_codebooks          # 17
+        self.do_sample, self.top_k, self.top_p, self.temperature = (
+            do_sample, top_k, top_p, temperature)
+
+        # References into the code predictor (not copies).
         cp = code_predictor
-        self.small_to_mtp = cp.small_to_mtp_projection
-        self.pred_model = cp.model  # Inner transformer model (5 layers)
-        self.lm_heads = cp.lm_head  # ModuleList[15]
-        self.codec_embeds = cp.model.codec_embedding  # ModuleList[15]
-        self.has_sliding_layers = "sliding_attention" in getattr(self.pred_model.config, "layer_types", [])
+        self._proj = cp.small_to_mtp_projection       # talker H -> predictor H
+        self._backbone = cp.model                     # 5-layer transformer
+        self._heads = cp.lm_head                      # ModuleList[15]
+        self._cb_embeds = cp.model.codec_embedding    # ModuleList[15]
+        self._has_sliding = "sliding_attention" in getattr(self._backbone.config, "layer_types", [])
 
-        # Transformers StaticCache for the predictor
-        self.static_cache = StaticCache(config=pred_config, max_cache_len=self.max_seq)
+        self._cache = StaticCache(config=cfg, max_cache_len=self.max_seq)
 
-        # Pre-allocate cache_position tensors for each step (avoids CPU→GPU in graph)
-        self.prefill_cache_pos = torch.arange(2, device=device)
-        self.decode_cache_positions = [
-            torch.tensor([2 + i], device=device) for i in range(self.num_codebooks - 1)
-        ]
+        # Per-step cache positions (pre-allocated: no CPU->GPU inside the graph).
+        self._prefill_pos = torch.arange(2, device=device)
+        self._decode_positions = [torch.tensor([2 + i], device=device)
+                                  for i in range(self.num_codebooks - 1)]
 
-        # I/O buffers
-        self.input_buf = torch.zeros(1, 2, talker_hidden_size, dtype=dtype, device=device)
-        self.output_tokens = torch.zeros(self.num_codebooks, dtype=torch.long, device=device)
+        # I/O buffers.
+        self._in_buf = torch.zeros(1, 2, talker_hidden_size, dtype=dtype, device=device)
+        self._out_tokens = torch.zeros(self.num_codebooks, dtype=torch.long, device=device)
 
         self.graph = None
         self.captured = False
-        self.prefill_attn = None
-        self.decode_attn = None
+        self._prefill_mask = None
+        self._decode_masks = []
 
-    def _init_cache_layers(self):
-        """Force lazy initialization of StaticCache layers before graph capture."""
-        config = self.pred_model.config
-        num_kv_heads = getattr(config, 'num_key_value_heads', config.num_attention_heads)
-        head_dim = getattr(config, 'head_dim', config.hidden_size // config.num_attention_heads)
+    def _prime_kv_buffers(self):
+        """Materialize StaticCache layer buffers before graph capture."""
+        cfg = self._backbone.config
+        num_kv_heads = getattr(cfg, 'num_key_value_heads', cfg.num_attention_heads)
+        head_dim = getattr(cfg, 'head_dim', cfg.hidden_size // cfg.num_attention_heads)
         dummy_k = torch.zeros(1, num_kv_heads, 1, head_dim, dtype=self.dtype, device=self.device)
-        for layer in self.static_cache.layers:
+        for layer in self._cache.layers:
             if not layer.is_initialized:
                 layer.lazy_initialization(dummy_k)
 
-    def _make_attn_mask(self, input_embeds: torch.Tensor, cache_position: torch.Tensor):
-        mask = create_causal_mask(
-            config=self.pred_model.config,
+    def _layer_masks(self, input_embeds: torch.Tensor, cache_position: torch.Tensor):
+        """Causal mask(s) for one step; always a dict keyed by attention type."""
+        full = create_causal_mask(
+            config=self._backbone.config,
             input_embeds=input_embeds,
             attention_mask=None,
             cache_position=cache_position,
-            past_key_values=self.static_cache,
+            past_key_values=self._cache,
         )
-        if self.has_sliding_layers:
-            sliding = create_sliding_window_causal_mask(
-                config=self.pred_model.config,
-                input_embeds=input_embeds,
-                attention_mask=None,
-                cache_position=cache_position,
-                past_key_values=self.static_cache,
-            )
-            return {"full_attention": mask, "sliding_attention": sliding}
-        return {"full_attention": mask}
+        if not self._has_sliding:
+            return {"full_attention": full}
+        sliding = create_sliding_window_causal_mask(
+            config=self._backbone.config,
+            input_embeds=input_embeds,
+            attention_mask=None,
+            cache_position=cache_position,
+            past_key_values=self._cache,
+        )
+        return {"full_attention": full, "sliding_attention": sliding}
 
-    def _build_attention_masks(self):
+    def _build_step_plan(self):
+        """Precompute masks for the prefill and all 14 decode steps once."""
         dummy_prefill = torch.zeros(1, 2, self.hidden_size, dtype=self.dtype, device=self.device)
         dummy_decode = torch.zeros(1, 1, self.hidden_size, dtype=self.dtype, device=self.device)
-        self.prefill_attn = self._make_attn_mask(dummy_prefill, self.prefill_cache_pos)
-        self.decode_attn = []
-        for pos in self.decode_cache_positions:
-            self.decode_attn.append(self._make_attn_mask(dummy_decode, pos))
+        self._prefill_mask = self._layer_masks(dummy_prefill, self._prefill_pos)
+        self._decode_masks = [self._layer_masks(dummy_decode, pos) for pos in self._decode_positions]
 
-    def _full_loop(self):
-        """The full 15-step predictor loop on static buffers."""
-        # Project input from talker hidden size to predictor hidden size
-        h = self.small_to_mtp(self.input_buf)  # [1, 2, hidden]
+    def _project(self, embeds: torch.Tensor) -> torch.Tensor:
+        return self._proj(embeds)
 
-        # Prefill: 2 tokens through all layers
-        out = self.pred_model(
+    def _forward_prefill(self, h: torch.Tensor) -> torch.Tensor:
+        out = self._backbone(
             inputs_embeds=h,
-            attention_mask=self.prefill_attn,
-            past_key_values=self.static_cache,
-            cache_position=self.prefill_cache_pos,
+            attention_mask=self._prefill_mask,
+            past_key_values=self._cache,
+            cache_position=self._prefill_pos,
             use_cache=True,
         )
-        h = out.last_hidden_state  # [1, 2, hidden] — already normalized
+        return out.last_hidden_state
 
-        # First codebook: logits from last position
-        logits = self.lm_heads[0](h[:, -1:, :])  # [1, 1, vocab]
-        tok = sample_logits(
-            logits[:, 0, :],
+    def _forward_decode(self, emb: torch.Tensor, step_idx: int) -> torch.Tensor:
+        out = self._backbone(
+            inputs_embeds=emb,
+            attention_mask=self._decode_masks[step_idx],
+            past_key_values=self._cache,
+            cache_position=self._decode_positions[step_idx],
+            use_cache=True,
+        )
+        return out.last_hidden_state
+
+    def _sample(self, head_module: torch.nn.Module, hidden_last: torch.Tensor) -> torch.Tensor:
+        logits = head_module(hidden_last)[:, 0]
+        return sample_logits(
+            logits,
             temperature=self.temperature,
             top_k=self.top_k,
             top_p=self.top_p,
             do_sample=self.do_sample,
         )
-        self.output_tokens[0] = tok[0]
 
-        # Remaining 14 codebooks
-        for cb_idx in range(1, self.num_codebooks):
-            # Embed previous token using codebook-specific embedding
-            emb = self.codec_embeds[cb_idx - 1](tok.unsqueeze(0))  # [1, 1, codec_hidden]
-            emb = self.small_to_mtp(emb)  # [1, 1, hidden]
+    def _run_pipeline(self):
+        """The full 15-step loop on static buffers (the captured region)."""
+        h = self._project(self._in_buf)                    # [1, 2, H_pred]
+        h = self._forward_prefill(h)                       # [1, 2, H_pred]
 
-            # Single-token decode through all layers
-            out = self.pred_model(
-                inputs_embeds=emb,
-                attention_mask=self.decode_attn[cb_idx - 1],
-                past_key_values=self.static_cache,
-                cache_position=self.decode_cache_positions[cb_idx - 1],
-                use_cache=True,
-            )
-            h = out.last_hidden_state
+        tok = self._sample(self._heads[0], h[:, -1:, :])  # [1] long
+        self._out_tokens[0] = tok[0]
 
-            logits = self.lm_heads[cb_idx](h[:, -1:, :])
-            tok = sample_logits(
-                logits[:, 0, :],
-                temperature=self.temperature,
-                top_k=self.top_k,
-                top_p=self.top_p,
-                do_sample=self.do_sample,
-            )
-            self.output_tokens[cb_idx] = tok[0]
-
-        return self.output_tokens
+        for step_idx in range(1, self.num_codebooks):
+            emb = self._project(self._cb_embeds[step_idx - 1](tok.unsqueeze(0)))
+            h = self._forward_decode(emb, step_idx - 1)
+            tok = self._sample(self._heads[step_idx], h[:, -1:, :])
+            self._out_tokens[step_idx] = tok[0]
 
     @torch.inference_mode()
-    def capture(self, num_warmup=3):
-        """Warmup and capture the CUDA graph."""
-        print(f"Warming up predictor ({num_warmup} runs)...")
+    def capture(self, num_warmup=3, pool=None):
+        """Warm up and capture the CUDA graph.
 
-        # Force cache initialization before graph capture
-        self._init_cache_layers()
-        self._build_attention_masks()
+        ``pool`` may be a shared ``torch.cuda.graphs.graph_pool_handle()`` so
+        several graphs (predictor + talker) draw from one memory pool.
+        """
+        print(f"Warming up predictor ({num_warmup} runs)...")
+        self._prime_kv_buffers()
+        self._build_step_plan()
 
         for _ in range(num_warmup):
-            self.static_cache.reset()
-            self._full_loop()
+            self._cache.reset()
+            self._run_pipeline()
         torch.cuda.synchronize()
 
         print("Capturing CUDA graph for predictor...")
-
-        with torch.cuda.device(self.device_index):
-            s = torch.cuda.Stream()
-            s.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(s):
-                self.graph = torch.cuda.CUDAGraph()
-                # Warmup in capture stream
-                self.static_cache.reset()
-                self._full_loop()
+        with torch.cuda.device(self._dev_idx):
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                self._cache.reset()
+                self._run_pipeline()          # warmup on the capture stream
                 torch.cuda.synchronize()
 
-                self.static_cache.reset()
-                with torch.cuda.graph(self.graph):
-                    self._full_loop()
+                self._cache.reset()
+                self.graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(self.graph, pool=pool):
+                    self._run_pipeline()
 
-        torch.cuda.current_stream().wait_stream(s)
+        torch.cuda.current_stream().wait_stream(side)
         torch.cuda.synchronize()
         self.captured = True
         print("CUDA graph captured!")
 
     @torch.inference_mode()
     def run(self, pred_input: torch.Tensor) -> torch.Tensor:
+        """Replay the captured loop.
+
+        Args:
+            pred_input: [1, 2, talker_hidden_size] — past_hidden cat first_codebook_embed.
+        Returns:
+            [15] long tensor of codebook tokens (a fresh copy).
         """
-        Run the captured graph.
-        pred_input: [1, 2, talker_hidden_size] (past_hidden cat first_codebook_embed)
-        Returns: [15] long tensor of codebook tokens
-        """
-        self.input_buf.copy_(pred_input)
-        self.static_cache.reset()
+        if not self.captured:
+            raise RuntimeError("PredictorGraph.capture() must be called before run()")
+        self._in_buf.copy_(pred_input)
+        self._cache.reset()
         self.graph.replay()
-        return self.output_tokens.clone()
+        return self._out_tokens.clone()

@@ -47,6 +47,9 @@ Thumbs.db
 # Reference repos (not part of the project)
 faster-qwen3-tts/
 
+# Temporary PyPI verification dir (extracted qwen-tts wheel, see test_v14_pypi.bat)
+.tmp_pypi_check/
+
 # Local launchers (personal, not part of the repo)
 .local/
 
