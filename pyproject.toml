@@ -26,7 +26,7 @@ classifiers = [
 
 dependencies = [
     "torch>=2.5.1",
-    "qwen-tts>=0.1.1",
+    "qwen-tts>=0.1.1,<0.2",
     "transformers>=4.57,<5",
     "accelerate",
     "torchaudio",

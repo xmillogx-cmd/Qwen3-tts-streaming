@@ -116,6 +116,10 @@ class FastTTSv14:
         load_ms = (time.perf_counter() - t0) * 1000
         print(f"[V14] Load: {load_ms:.0f}ms", flush=True)
 
+        # Fail fast if this qwen-tts build lacks any API the streaming overlay needs.
+        from ._compat import probe_model_api
+        probe_model_api(self.model)
+
         # Preflight warmup — capture CUDA graphs and reach steady state.
         # Graphs are shape-based, not content-based: the talker graph has a position/
         # attention-mask table for every position up to 2048 (any prefill length works),

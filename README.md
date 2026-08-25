@@ -109,7 +109,7 @@ Text → split_segments() → generate_custom_voice_streaming() × N segments
 
 - Python 3.10+
 - PyTorch ≥ 2.5.1 with CUDA (for GPU use)
-- `qwen-tts>=0.1.1`
+- `qwen-tts>=0.1.1,<0.2` — the overlay is verified against this API; a future qwen-tts release that renames any of its touchpoints will fail fast at import/load time (`fast_tts._compat`) instead of crashing mid-streaming
 - `transformers>=4.57,<5`
 - `accelerate`, `torchaudio`, `soundfile`, `sounddevice`, `numpy`
 
