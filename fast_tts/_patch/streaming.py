@@ -1,7 +1,8 @@
 """Streaming + CUDA-graph methods for ``Qwen3TTSModel``.
 
-Twelve methods ported from faster-qwen3-tts (MIT) that the stock PyPI
-``qwen-tts`` wheel does not ship. They are attached to the stock
+Twelve methods from this project's reference implementation that the stock
+PyPI ``qwen-tts`` wheel does not ship (cross-checked against the independent
+faster-qwen3-tts, MIT). They are attached to the stock
 ``qwen_tts.Qwen3TTSModel`` at import time by :func:`fast_tts._patch.apply_patch`.
 
 The lazy ``from .predictor_graph / .talker_graph / .sampling`` imports inside

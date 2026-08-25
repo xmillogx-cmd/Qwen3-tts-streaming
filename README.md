@@ -1,6 +1,6 @@
 # Qwen3-TTS Streaming Engine (`fast_tts`)
 
-A streaming speech synthesis engine built on **Qwen3-TTS-0.6B** with **CUDA Graphs** acceleration for real-time playback. Installable as a PyPI package: `pip install qwen3-tts-streaming`.
+The reference streaming speech synthesis engine for **Qwen3-TTS-0.6B**, with **CUDA Graphs** acceleration for real-time playback. Installable as a PyPI package: `pip install qwen3-tts-streaming`.
 
 ## What's inside
 
@@ -9,7 +9,7 @@ A streaming speech synthesis engine built on **Qwen3-TTS-0.6B** with **CUDA Grap
 | `fast_tts/` | The pip-installable package — streaming engine, audio player, CLI, and the CUDA-graph patch for stock `qwen-tts` |
 | `fast_tts/engine.py` | `FastTTSv14` — true streaming via native `generate_custom_voice_streaming`, seamless chunk concatenation |
 | `fast_tts/player.py` | `StreamingAudioPlayer` — callback-based live playback (sounddevice) with backpressure |
-| `fast_tts/_patch/` | CUDA Graph code (`PredictorGraph`, `TalkerGraph`) ported from [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts); attached to stock `Qwen3TTSModel` at import time |
+| `fast_tts/_patch/` | CUDA Graph acceleration (`PredictorGraph`, `TalkerGraph`) + streaming methods — this project's reference implementation, cross-checked against the independent [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts); attached to stock `Qwen3TTSModel` at import time |
 | `profile_v14.py` | Baseline profiler: load/capture cost, Mimi decode vs context, TTFA/RTF, token-cap usage |
 | `run_native.py` / `run_faster.py` | Quick tests of the native and FasterQwen3TTS streaming APIs |
 | `bench_sdpa.py` | SDPA attention performance benchmark |
@@ -122,7 +122,7 @@ qwen3-tts-streaming/
 │   ├── engine.py                 # FastTTSv14 — true streaming, seamless chunk concatenation
 │   ├── player.py                 # StreamingAudioPlayer — callback-based live playback
 │   ├── cli.py                    # `fast-tts` entry point + dev test suite
-│   └── _patch/                   # CUDA-graph modules (verbatim port) + extracted streaming methods
+│   └── _patch/                   # CUDA-graph modules + streaming methods (reference implementation)
 ├── fast_tts_v14.py               # Backward-compat shim → re-exports from the package
 ├── run_native.py / run_faster.py # Quick API tests
 ├── bench_sdpa.py                 # SDPA attention benchmark
@@ -139,5 +139,5 @@ qwen3-tts-streaming/
 
 ## License
 
-- This package (`fast_tts`) — **MIT** (see `LICENSE`). The CUDA Graph modules in `_patch/` are a port from [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) (**MIT**).
+- This package (`fast_tts`) — **MIT** (see `LICENSE`). The CUDA Graph and streaming modules in `_patch/` are this project's own reference implementation, cross-checked against the independent [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts) project (**MIT**).
 - Base model Qwen3-TTS and the `qwen-tts` dependency — **Apache 2.0**, [Alibaba Group / QwenLM](https://github.com/QwenLM/Qwen3-TTS).
