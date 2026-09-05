@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a crash, wrong output, or performance regression in qwen3-tts-streaming / fast_tts
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill in as much of the following as you can — GPU/CUDA details are the most common cause of issues with this project.
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: Output of `pip show qwen3-tts-streaming` (or the commit hash if running from source).
+    validations:
+      required: true
+  - type: input
+    id: deps
+    attributes:
+      label: Dependency versions
+      description: Output of `pip list | findstr /i "qwen-tts transformers torch torchaudio"` (or `grep` on Linux/macOS).
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and CUDA
+      description: e.g. "RTX 5060 Ti, CC 12.0, CUDA 13.2, torch 2.13.0+cu132".
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, Linux, macOS]
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. fast-tts --model /path/to/model --text "..."
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full traceback and, if relevant, TTFA/RTF numbers from the run.
+    validations:
+      required: true

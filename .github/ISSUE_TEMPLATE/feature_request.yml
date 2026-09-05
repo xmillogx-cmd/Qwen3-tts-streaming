@@ -1,0 +1,35 @@
+name: Feature request or improvement
+description: Suggest a new feature, optimization, or change to qwen3-tts-streaming / fast_tts
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an idea! Before filing, please search existing issues in case it has already been discussed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? e.g. "TTFA is too high for live use on my GPU".
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Area affected
+      multiple: true
+      options:
+        - Streaming engine (fast_tts/engine.py)
+        - CUDA-graph overlay (fast_tts/_patch/)
+        - Audio player / CLI
+        - Packaging / docs

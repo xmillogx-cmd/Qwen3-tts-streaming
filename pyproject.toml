@@ -52,6 +52,10 @@ packages = ["fast_tts"]
 [tool.hatch.build.targets.sdist]
 exclude = [
     "QWEN.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    ".github/**",
     "requirements.txt",
     "fast_tts_v14.py",
     "*.bat",

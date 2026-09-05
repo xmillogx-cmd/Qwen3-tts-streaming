@@ -1,0 +1,14 @@
+name: Question
+description: Ask a usage or integration question about qwen3-tts-streaming / fast_tts
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: Please include your setup (package version, GPU/CUDA/torch versions) so the answer is actionable.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and where does it fail or get confusing?
+    validations:
+      required: true
