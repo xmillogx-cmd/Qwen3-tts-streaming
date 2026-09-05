@@ -1,0 +1,6 @@
+# Vendored third-party source trees: development reference only.
+# Not shipped in the PyPI package (excluded from sdist/wheel) and never
+# executed by fast_tts — scanning them only produces false-positive alerts
+# on upstream code we do not control or run.
+paths:
+  - Qwen3-TTS/**
