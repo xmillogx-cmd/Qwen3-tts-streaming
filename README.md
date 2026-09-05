@@ -112,7 +112,7 @@ Text → split_segments() → generate_custom_voice_streaming() × N segments
 - Python 3.10+
 - PyTorch ≥ 2.5.1 with CUDA (for GPU use)
 - `qwen-tts>=0.1.1,<0.2` — the overlay is verified against this API; a future qwen-tts release that renames any of its touchpoints will fail fast at import/load time (`fast_tts._compat`) instead of crashing mid-streaming
-- `transformers>=4.57,<5`
+- `transformers>=4.57,<5` — pinned to the 4.x line because `qwen-tts 0.1.1` hard-pins `transformers==4.57.3`. Several transformers CVEs (CVE-2026-4372, CVE-2026-5241, CVE-2026-9856) are patched only in the 5.x line; none of their vulnerable code paths is exercised by this package — see `SECURITY.md` ("Known upstream vulnerabilities") in the repository
 - `accelerate`, `torchaudio`, `soundfile`, `sounddevice`, `numpy`
 
 ## Repository layout (dev repo)
